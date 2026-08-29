@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>P610 Microphone Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #0d1117;
+      --card: #171c24;
+      --text: #f2f5f8;
+      --muted: #9ea8b5;
+      --accent: #4ea1ff;
+      --good: #35c971;
+      --warn: #ffb020;
+      --bad: #ff5263;
+      --border: rgba(255,255,255,.10);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top, #182333 0, var(--bg) 42%);
+      color: var(--text);
+      padding: max(18px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: clamp(1.5rem, 7vw, 2.35rem); margin: 4px 0 6px; letter-spacing: -.03em; }
+    .subtitle { color: var(--muted); margin-bottom: 18px; line-height: 1.45; }
+    .card {
+      background: rgba(23,28,36,.94);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 18px;
+      box-shadow: 0 18px 55px rgba(0,0,0,.28);
+      margin-bottom: 14px;
+    }
+    .warning {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      background: rgba(255,176,32,.10);
+      border-color: rgba(255,176,32,.34);
+      color: #ffe2ad;
+      line-height: 1.4;
+    }
+    .warning strong { color: #ffc96b; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 15px;
+      min-height: 54px;
+      padding: 12px 16px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      background: #28313d;
+      color: var(--text);
+      transition: transform .12s ease, opacity .12s ease, background .12s ease;
+    }
+    button:active { transform: scale(.98); }
+    button:disabled { opacity: .48; cursor: default; }
+    button.primary { background: var(--accent); color: #061421; }
+    button.stop { background: var(--bad); color: #240309; }
+    .status-row { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: #606a78; box-shadow: 0 0 0 4px rgba(96,106,120,.15); }
+    .dot.live { background: var(--good); box-shadow: 0 0 0 4px rgba(53,201,113,.15), 0 0 18px rgba(53,201,113,.5); }
+    .dot.error { background: var(--bad); box-shadow: 0 0 0 4px rgba(255,82,99,.15); }
+    #status { font-weight: 650; }
+    .meter-shell {
+      height: 30px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #080b10;
+      border: 1px solid var(--border);
+      position: relative;
+    }
+    .meter-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--good) 0 68%, var(--warn) 82%, var(--bad) 100%);
+      transition: width 80ms linear;
+    }
+    .meter-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: .76rem; margin-top: 5px; }
+    .reading { display: flex; align-items: baseline; gap: 8px; margin: 16px 0 2px; }
+    .reading .main { font-size: 2.4rem; font-weight: 800; letter-spacing: -.04em; }
+    .reading .unit { color: var(--muted); }
+    #quality { color: var(--muted); font-weight: 600; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 16px; }
+    .stat { background: #11161d; border-radius: 13px; padding: 11px; border: 1px solid rgba(255,255,255,.06); }
+    .stat b { display: block; font-size: 1rem; margin-top: 3px; }
+    .stat span { color: var(--muted); font-size: .76rem; }
+    label { display: block; font-weight: 650; margin-bottom: 8px; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+    .range-row { display: flex; justify-content: space-between; color: var(--muted); font-size: .85rem; margin-top: 4px; }
+    audio { width: 100%; margin-top: 14px; }
+    .privacy { color: var(--muted); font-size: .84rem; line-height: 1.45; margin-top: 12px; }
+    .error-text { color: #ff9aa5; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 10px; font-size: .85rem; }
+    h2 { margin: 0 0 6px; font-size: 1.25rem; }
+    .section-note { color: var(--muted); line-height: 1.42; margin-bottom: 15px; }
+    .preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px; }
+    .preset-grid button { min-height: 46px; padding: 9px; font-size: .9rem; }
+    .setting { padding: 12px 0; border-top: 1px solid rgba(255,255,255,.07); }
+    .setting:first-of-type { border-top: 0; }
+    .setting-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 7px; }
+    .setting-head label { margin: 0; }
+    .setting-value { font-weight: 800; color: #8dc5ff; white-space: nowrap; }
+    .setting-help { color: var(--muted); font-size: .78rem; line-height: 1.35; margin-top: 5px; }
+    .apply-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; margin-top: 15px; }
+    .settings-state { color: var(--muted); font-size: .86rem; line-height: 1.35; }
+    .settings-state.good { color: #72e39d; }
+    .settings-state.bad { color: #ff9aa5; }
+    @media (max-width: 520px) {
+      .controls { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .stat:last-child { grid-column: 1 / -1; }
+      .preset-grid { grid-template-columns: 1fr; }
+      .apply-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>P610 — монитор микрофона</h1>
+  <div class="subtitle">Живой звук с USB-микрофона Home Assistant и объективный уровень чувствительности.</div>
+
+  <section class="card warning">
+    <div>🎧</div>
+    <div><strong>Используй наушники.</strong> Если включить динамик телефона рядом с P610, микрофон услышит сам себя и появится эхо или свист.</div>
+  </section>
+
+  <section class="card">
+    <div class="status-row"><div id="dot" class="dot"></div><div id="status">Подключение не запущено</div></div>
+    <div class="controls">
+      <button id="listen" class="primary">▶ Слушать вживую</button>
+      <button id="sample">● Записать тест 5 секунд</button>
+    </div>
+    <div id="error" class="error-text"></div>
+  </section>
+
+  <section class="card">
+    <div class="meter-shell"><div id="meter" class="meter-fill"></div></div>
+    <div class="meter-scale"><span>−60</span><span>−48</span><span>−36</span><span>−24</span><span>−12</span><span>0 dBFS</span></div>
+    <div class="reading"><span id="rms" class="main">−∞</span><span class="unit">dBFS RMS</span></div>
+    <div id="quality">Ожидание аудио</div>
+    <div class="stats">
+      <div class="stat"><span>Пиковый уровень</span><b id="peak">−∞ dBFS</b></div>
+      <div class="stat"><span>Воспроизведение</span><b id="latency">Системный MP3</b></div>
+      <div class="stat"><span>Аудиоканал</span><b id="drops">Ожидание</b></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Чувствительность P610</h2>
+    <div class="section-note">Эти настройки меняют реальный системный вход и обработку Assist Satellite. После применения голосовой спутник перезапустится примерно на несколько секунд.</div>
+
+    <div class="preset-grid">
+      <button class="preset" data-preset="natural">Натуральный</button>
+      <button class="preset" data-preset="sensitive">Чувствительный</button>
+      <button class="preset" data-preset="noisy">Шумная комната</button>
+    </div>
+
+    <div class="setting">
+      <div class="setting-head"><label for="systemVolume">Системный вход P610</label><span id="systemVolumeValue" class="setting-value">—%</span></div>
+      <input id="systemVolume" type="range" min="0" max="100" step="1" value="83">
+      <div class="setting-help">Аппаратный/системный уровень PulseAudio. Обычно стоит держать 85–100%.</div>
+    </div>
+
+    <div class="setting">
+      <div class="setting-head"><label for="micVolume">Уровень PCM Assist</label><span id="micVolumeValue" class="setting-value">—%</span></div>
+      <input id="micVolume" type="range" min="10" max="100" step="5" value="50">
+      <div class="setting-help">Upstream linux-voice-assistant принимает 1–100% и ограничивает 1–10% одинаковым минимумом 10%. Это не множитель 0,5–4×.</div>
+    </div>
+
+    <div class="setting">
+      <div class="setting-head"><label for="autoGain">Автоматическое усиление</label><span id="autoGainValue" class="setting-value">—</span></div>
+      <input id="autoGain" type="range" min="0" max="31" step="1" value="0">
+      <div class="setting-help">Подтягивает тихую дальнюю речь. Высокие значения могут «качать» фон между словами.</div>
+    </div>
+
+    <div class="setting">
+      <div class="setting-head"><label for="noiseSuppression">Шумоподавление</label><span id="noiseSuppressionValue" class="setting-value">—</span></div>
+      <input id="noiseSuppression" type="range" min="0" max="4" step="1" value="0">
+      <div class="setting-help">0 сохраняет все тихие звуки; 1 обычно оптимален. Уровни 3–4 могут съедать начало коротких слов.</div>
+    </div>
+
+    <div class="apply-row">
+      <div id="settingsState" class="settings-state">Загрузка текущих настроек…</div>
+      <button id="applySettings" class="primary">Применить</button>
+    </div>
+    <div class="privacy">Пресеты не применяются автоматически. Для постоянной работы сначала подтвердите профиль одинаковой тестовой фразой; AGC 31 и Max noise suppression намеренно не используются.</div>
+  </section>
+
+  <section class="card">
+    <label for="gain">Усиление прослушивания: <span id="gainLabel">8.0×</span></label>
+    <input id="gain" type="range" min="0.25" max="20" step="0.25" value="8">
+    <div class="range-row"><span>0,25×</span><span>20×</span></div>
+    <div class="setting-help">Меняет только звук в телефоне. На распознавание и чувствительность Assist Satellite не влияет. Новое значение применяется при следующем запуске live.</div>
+    <audio id="livePlayer" controls playsinline hidden></audio>
+    <audio id="samplePlayer" controls playsinline hidden></audio>
+    <div class="privacy">Поток идёт только пока открыта эта страница и нажата кнопка «Слушать». Живой звук и тестовый образец не сохраняются на диске Home Assistant.</div>
+  </section>
+</main>
+<script>
+(() => {
+  const listenButton = document.getElementById('listen');
+  const sampleButton = document.getElementById('sample');
+  const statusEl = document.getElementById('status');
+  const dotEl = document.getElementById('dot');
+  const errorEl = document.getElementById('error');
+  const meterEl = document.getElementById('meter');
+  const rmsEl = document.getElementById('rms');
+  const peakEl = document.getElementById('peak');
+  const latencyEl = document.getElementById('latency');
+  const dropsEl = document.getElementById('drops');
+  const qualityEl = document.getElementById('quality');
+  const gainEl = document.getElementById('gain');
+  const gainLabel = document.getElementById('gainLabel');
+  const livePlayer = document.getElementById('livePlayer');
+  const samplePlayer = document.getElementById('samplePlayer');
+  const systemVolumeEl = document.getElementById('systemVolume');
+  const systemVolumeValue = document.getElementById('systemVolumeValue');
+  const micVolumeEl = document.getElementById('micVolume');
+  const micVolumeValue = document.getElementById('micVolumeValue');
+  const autoGainEl = document.getElementById('autoGain');
+  const autoGainValue = document.getElementById('autoGainValue');
+  const noiseSuppressionEl = document.getElementById('noiseSuppression');
+  const noiseSuppressionValue = document.getElementById('noiseSuppressionValue');
+  const settingsState = document.getElementById('settingsState');
+  const applySettingsButton = document.getElementById('applySettings');
+  const presetButtons = Array.from(document.querySelectorAll('.preset'));
+
+  let socket = null;
+  let audioContext = null;
+  let outputGain = null;
+  let nextPlaybackTime = 0;
+  let sampleRate = 48000;
+  let channels = 1;
+  let running = false;
+  let drops = 0;
+  const scheduled = new Set();
+
+  const relativeUrl = (path) => new URL(path, window.location.href);
+  const websocketUrl = () => {
+    const url = relativeUrl('./ws');
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return url.toString();
+  };
+
+  const sensitivityPresets = {
+    natural: {
+      system_volume_percent: 100,
+      mic_volume: 50,
+      mic_auto_gain: 0,
+      mic_noise_suppression: 0,
+      title: 'Натуральный',
+    },
+    sensitive: {
+      system_volume_percent: 100,
+      mic_volume: 100,
+      mic_auto_gain: 10,
+      mic_noise_suppression: 0,
+      title: 'Чувствительный',
+    },
+    noisy: {
+      system_volume_percent: 100,
+      mic_volume: 100,
+      mic_auto_gain: 6,
+      mic_noise_suppression: 1,
+      title: 'Шумная комната',
+    },
+  };
+
+  const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  function updateSettingsLabels() {
+    systemVolumeValue.textContent = `${Math.round(Number(systemVolumeEl.value))}%`;
+    micVolumeValue.textContent = `${Math.round(Number(micVolumeEl.value))}%`;
+    autoGainValue.textContent = String(Math.round(Number(autoGainEl.value)));
+    noiseSuppressionValue.textContent = String(Math.round(Number(noiseSuppressionEl.value)));
+  }
+
+  function setSettingsState(text, type = '') {
+    settingsState.textContent = text;
+    settingsState.className = `settings-state ${type}`.trim();
+  }
+
+  function fillSensitivityControls(settings) {
+    systemVolumeEl.value = String(Math.round(Number(settings.system_volume_percent ?? 83)));
+    micVolumeEl.value = String(Number(settings.mic_volume ?? 1));
+    autoGainEl.value = String(Math.round(Number(settings.mic_auto_gain ?? 0)));
+    noiseSuppressionEl.value = String(Math.round(Number(settings.mic_noise_suppression ?? 0)));
+    updateSettingsLabels();
+    const name = settings.microphone?.description || 'P610';
+    setSettingsState(`${name}; Assist Satellite: ${settings.assist_satellite_state || 'unknown'}`, 'good');
+  }
+
+  async function loadSensitivitySettings() {
+    setSettingsState('Загрузка текущих настроек…');
+    try {
+      const response = await fetch(relativeUrl('./api/settings'), { cache: 'no-store' });
+      if (!response.ok) throw new Error(await response.text());
+      fillSensitivityControls(await response.json());
+    } catch (error) {
+      setSettingsState(`Не удалось прочитать настройки: ${error}`, 'bad');
+    }
+  }
+
+  async function applySensitivitySettings() {
+    stopListening();
+    showError('');
+    applySettingsButton.disabled = true;
+    presetButtons.forEach((button) => { button.disabled = true; });
+    setSettingsState('Применяю настройки и перезапускаю Assist Satellite…');
+    try {
+      const payload = {
+        system_volume_percent: Number(systemVolumeEl.value),
+        mic_volume: Number(micVolumeEl.value),
+        mic_auto_gain: Number(autoGainEl.value),
+        mic_noise_suppression: Number(noiseSuppressionEl.value),
+        restart_assist_satellite: true,
+      };
+      const response = await fetch(relativeUrl('./api/settings'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setSettingsState('Применено. Assist Satellite перезапускается…', 'good');
+      await delay(12000);
+      await loadSensitivitySettings();
+    } catch (error) {
+      setSettingsState(`Ошибка применения: ${error}`, 'bad');
+    } finally {
+      applySettingsButton.disabled = false;
+      presetButtons.forEach((button) => { button.disabled = false; });
+    }
+  }
+
+  function setStatus(text, state = 'idle') {
+    statusEl.textContent = text;
+    dotEl.className = `dot ${state === 'live' ? 'live' : state === 'error' ? 'error' : ''}`;
+  }
+
+  function showError(message = '') {
+    errorEl.textContent = message;
+  }
+
+  function dbText(value) {
+    return Number.isFinite(value) ? `${value.toFixed(1)}` : '−∞';
+  }
+
+  function classify(rms, peak) {
+    if (peak > -1) return ['Перегруз: говори тише или уменьши усиление микрофона', '#ff7b88'];
+    if (rms > -14) return ['Очень громко', '#ffb55b'];
+    if (rms > -26) return ['Хороший уровень обычной речи', '#58d987'];
+    if (rms > -38) return ['Тихо, но речь должна быть разборчивой', '#a8d978'];
+    if (rms > -52) return ['Очень тихо — проверяй дальность и чувствительность', '#d6b56b'];
+    return ['Фоновый шум или почти тишина', '#9ea8b5'];
+  }
+
+  function updateMeter(samples) {
+    let sum = 0;
+    let peak = 0;
+    for (let i = 0; i < samples.length; i += 1) {
+      const absolute = Math.abs(samples[i]);
+      sum += samples[i] * samples[i];
+      if (absolute > peak) peak = absolute;
+    }
+    const rms = Math.sqrt(sum / Math.max(1, samples.length));
+    const rmsDb = 20 * Math.log10(Math.max(rms, 1 / 32768));
+    const peakDb = 20 * Math.log10(Math.max(peak, 1 / 32768));
+    const percent = Math.max(0, Math.min(100, ((rmsDb + 60) / 60) * 100));
+    meterEl.style.width = `${percent}%`;
+    rmsEl.textContent = dbText(rmsDb);
+    peakEl.textContent = `${dbText(peakDb)} dBFS`;
+    const [quality, color] = classify(rmsDb, peakDb);
+    qualityEl.textContent = quality;
+    qualityEl.style.color = color;
+  }
+
+  async function ensureAudio() {
+    if (!audioContext || audioContext.state === 'closed') {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      audioContext = new AudioCtx({ sampleRate });
+      outputGain = audioContext.createGain();
+      outputGain.gain.value = Number(gainEl.value);
+      outputGain.connect(audioContext.destination);
+    }
+
+    const resumePromise = audioContext.state !== 'running'
+      ? audioContext.resume()
+      : Promise.resolve();
+
+    // Android WebView unlocks Web Audio reliably only when a source is started
+    // synchronously from the user's tap. This silent frame is not audible.
+    const unlockBuffer = audioContext.createBuffer(1, 1, audioContext.sampleRate);
+    const unlockSource = audioContext.createBufferSource();
+    unlockSource.buffer = unlockBuffer;
+    unlockSource.connect(outputGain);
+    unlockSource.start(0);
+
+    await resumePromise;
+    if (audioContext.state !== 'running') {
+      throw new Error('Android не разрешил воспроизведение. Нажми кнопку ещё раз.');
+    }
+  }
+
+  function cancelFutureAudio() {
+    if (!audioContext) return;
+    const now = audioContext.currentTime;
+    for (const item of Array.from(scheduled)) {
+      if (item.startAt > now + 0.02) {
+        try { item.source.stop(); } catch (_) {}
+        scheduled.delete(item);
+      }
+    }
+    nextPlaybackTime = now + 0.12;
+  }
+
+  function schedulePcm(arrayBuffer) {
+    const view = new DataView(arrayBuffer);
+    const totalSamples = Math.floor(view.byteLength / 2);
+    if (!totalSamples) return;
+    const frameCount = Math.floor(totalSamples / channels);
+    if (!frameCount) return;
+
+    const allSamples = new Float32Array(frameCount * channels);
+    for (let i = 0; i < allSamples.length; i += 1) {
+      allSamples[i] = view.getInt16(i * 2, true) / 32768;
+    }
+    updateMeter(allSamples);
+    latencyEl.textContent = 'Системный MP3';
+    dropsEl.textContent = 'Активен';
+  }
+
+  function liveStreamUrl() {
+    const gain = Math.max(0.25, Math.min(20, Number(gainEl.value) || 8));
+    const url = relativeUrl('./api/live.mp3');
+    url.searchParams.set('gain', String(gain));
+    url.searchParams.set('t', String(Date.now()));
+    return url.toString();
+  }
+
+  async function startListening() {
+    showError('');
+    setStatus('Подключение к микрофону…');
+
+    livePlayer.hidden = false;
+    livePlayer.src = liveStreamUrl();
+    livePlayer.volume = 1;
+    livePlayer.load();
+    const playbackPromise = livePlayer.play();
+    playbackPromise.catch((error) => {
+      showError(`Android не запустил live автоматически: ${error}. Нажми ▶ на плеере ниже.`);
+      setStatus('Live готов — нажми ▶ на системном плеере', 'error');
+    });
+
+    socket = new WebSocket(websocketUrl());
+    socket.binaryType = 'arraybuffer';
+
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'start' }));
+    socket.onmessage = async (event) => {
+      if (typeof event.data !== 'string') {
+        schedulePcm(event.data);
+        return;
+      }
+      let message;
+      try { message = JSON.parse(event.data); } catch (_) { return; }
+      if (message.type === 'ready') {
+        sampleRate = Number(message.sample_rate || sampleRate);
+        channels = Number(message.channels || channels);
+      } else if (message.type === 'started') {
+        sampleRate = Number(message.sample_rate || sampleRate);
+        channels = Number(message.channels || channels);
+        running = true;
+        listenButton.textContent = '■ Остановить прослушивание';
+        listenButton.classList.remove('primary');
+        listenButton.classList.add('stop');
+        sampleButton.disabled = true;
+        setStatus('Микрофон передаётся в телефон', 'live');
+      } else if (message.type === 'error') {
+        showError([message.message, message.detail].filter(Boolean).join('\n'));
+        setStatus('Ошибка микрофона', 'error');
+        stopListening(false);
+      }
+    };
+    socket.onerror = () => {
+      showError('Не удалось открыть защищённый аудиоканал.');
+      setStatus('Ошибка соединения', 'error');
+    };
+    socket.onclose = () => {
+      if (running) setStatus('Аудиоканал закрыт');
+      running = false;
+      listenButton.textContent = '▶ Слушать вживую';
+      listenButton.classList.add('primary');
+      listenButton.classList.remove('stop');
+      sampleButton.disabled = false;
+    };
+  }
+
+  function stopListening(sendStop = true) {
+    running = false;
+    if (socket) {
+      if (sendStop && socket.readyState === WebSocket.OPEN) {
+        try { socket.send(JSON.stringify({ type: 'stop' })); } catch (_) {}
+      }
+      try { socket.close(); } catch (_) {}
+      socket = null;
+    }
+    cancelFutureAudio();
+    if (audioContext && audioContext.state === 'running') audioContext.suspend().catch(() => {});
+    livePlayer.pause();
+    livePlayer.removeAttribute('src');
+    livePlayer.load();
+    livePlayer.hidden = true;
+    listenButton.textContent = '▶ Слушать вживую';
+    listenButton.classList.add('primary');
+    listenButton.classList.remove('stop');
+    sampleButton.disabled = false;
+    setStatus('Прослушивание остановлено');
+  }
+
+  listenButton.addEventListener('click', async () => {
+    if (running || (socket && socket.readyState === WebSocket.CONNECTING)) stopListening();
+    else {
+      try { await startListening(); }
+      catch (error) {
+        showError(String(error));
+        setStatus('Не удалось запустить звук', 'error');
+      }
+    }
+  });
+
+  [systemVolumeEl, micVolumeEl, autoGainEl, noiseSuppressionEl].forEach((element) => {
+    element.addEventListener('input', updateSettingsLabels);
+  });
+
+  presetButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const preset = sensitivityPresets[button.dataset.preset];
+      if (!preset) return;
+      systemVolumeEl.value = String(preset.system_volume_percent);
+      micVolumeEl.value = String(preset.mic_volume);
+      autoGainEl.value = String(preset.mic_auto_gain);
+      noiseSuppressionEl.value = String(preset.mic_noise_suppression);
+      updateSettingsLabels();
+      setSettingsState(`Пресет «${preset.title}» выбран. Нажми «Применить».`);
+    });
+  });
+
+  applySettingsButton.addEventListener('click', applySensitivitySettings);
+
+  gainEl.addEventListener('input', () => {
+    const gain = Number(gainEl.value);
+    gainLabel.textContent = `${gain.toFixed(2).replace(/0$/, '').replace(/\.0$/, '')}×`;
+    if (running) setStatus('Новое усиление применится после остановки и повторного запуска live');
+  });
+
+  sampleButton.addEventListener('click', async () => {
+    stopListening();
+    showError('');
+    sampleButton.disabled = true;
+    sampleButton.textContent = 'Говори сейчас — запись 5 секунд…';
+    setStatus('Записывается временный тестовый образец', 'live');
+    try {
+      const response = await fetch(relativeUrl('./api/sample.wav?seconds=5'), { cache: 'no-store' });
+      if (!response.ok) throw new Error(await response.text());
+      const blob = await response.blob();
+      if (samplePlayer.src) URL.revokeObjectURL(samplePlayer.src);
+      samplePlayer.src = URL.createObjectURL(blob);
+      samplePlayer.hidden = false;
+      samplePlayer.load();
+      setStatus('Запись готова — нажми ▶ на плеере');
+    } catch (error) {
+      showError(String(error));
+      setStatus('Ошибка записи образца', 'error');
+    } finally {
+      sampleButton.disabled = false;
+      sampleButton.textContent = '● Записать тест 5 секунд';
+    }
+  });
+
+  livePlayer.addEventListener('playing', () => {
+    if (running) setStatus('Микрофон слышен через системный MP3-плеер', 'live');
+  });
+  livePlayer.addEventListener('waiting', () => {
+    if (running) setStatus('Буферизация live-потока…');
+  });
+  livePlayer.addEventListener('error', () => {
+    const detail = livePlayer.error ? `код ${livePlayer.error.code}` : 'неизвестная ошибка';
+    showError(`Системный плеер не смог открыть live MP3 (${detail}).`);
+    setStatus('Ошибка live-воспроизведения', 'error');
+  });
+  samplePlayer.addEventListener('play', () => setStatus('Воспроизводится тестовая запись', 'live'));
+  samplePlayer.addEventListener('ended', () => setStatus('Тестовая запись завершена'));
+  samplePlayer.addEventListener('error', () => {
+    showError('Android не смог воспроизвести WAV. Попробуй открыть панель заново.');
+    setStatus('Ошибка воспроизведения теста', 'error');
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && running) stopListening();
+  });
+  window.addEventListener('pagehide', () => stopListening());
+
+  gainLabel.textContent = `${Number(gainEl.value).toFixed(1)}×`;
+  updateSettingsLabels();
+  loadSensitivitySettings();
+
+  fetch(relativeUrl('./api/health'), { cache: 'no-store' })
+    .then((response) => response.json())
+    .then((health) => {
+      if (!health.ok) throw new Error('ffmpeg недоступен');
+      sampleRate = Number(health.sample_rate || sampleRate);
+      channels = Number(health.channels || channels);
+      setStatus(`Готово: ${sampleRate / 1000} кГц, ${channels === 1 ? 'моно' : 'стерео'}`);
+    })
+    .catch((error) => {
+      showError(String(error));
+      setStatus('Монитор не готов', 'error');
+    });
+})();
+</script>
+</body>
+</html>

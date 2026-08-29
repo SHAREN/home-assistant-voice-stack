@@ -1,0 +1,20 @@
+{
+  "views": [
+    {
+      "title": "Live Assistant",
+      "path": "live",
+      "icon": "mdi:account-voice",
+      "type": "panel",
+      "cards": [
+        {
+          "type": "custom:pipecat-assist-card-v5",
+          "name": "Pipecat Live (Gemini)",
+          "animation_on_idle": true,
+          "compact_mode": false,
+          "accent_color": "#206cff",
+          "entry_id": "01KYDE9FJR75Z252Q8H2C7KBBH"
+        }
+      ]
+    }
+  ]
+}

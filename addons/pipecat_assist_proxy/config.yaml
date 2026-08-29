@@ -1,0 +1,39 @@
+name: Pipecat Assist Proxy
+version: "0.1.75-proxy23"
+slug: pipecat_assist_proxy
+description: Full-duplex Gemini Live voice assistant for Home Assistant with browser WebRTC, optional P610 local audio, wake word, MCP tools, and session diagnostics.
+url: https://github.com/SHAREN/home-assistant-voice-stack
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+host_network: true
+audio: true
+ingress: true
+ingress_port: 7861
+panel_icon: mdi:account-voice
+homeassistant_api: true
+hassio_api: true
+hassio_role: manager
+options:
+  runner_port: 7861
+  log_level: "INFO"
+  gemini_proxy_url: ""
+  p610_local_audio: false
+  p610_flow_id: "home-default"
+  p610_wake_threshold: 0.6
+  p610_stop_threshold: 0.5
+  p610_refractory_seconds: 2.0
+  p610_stop_guard_seconds: 0.5
+schema:
+  runner_port: port
+  log_level: list(DEBUG|INFO|WARNING|ERROR)
+  gemini_proxy_url: str
+  p610_local_audio: bool
+  p610_flow_id: str
+  p610_wake_threshold: float
+  p610_stop_threshold: float
+  p610_refractory_seconds: float
+  p610_stop_guard_seconds: float

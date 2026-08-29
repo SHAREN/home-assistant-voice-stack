@@ -1,0 +1,35 @@
+--- a/custom_components/ha_mcp_tools/embedded_server.py
++++ b/custom_components/ha_mcp_tools/embedded_server.py
+@@ -40,0 +41 @@
++from pathlib import Path
+@@ -814,0 +816,30 @@
++
++        # Append local, version-controlled operating instructions without
++        # modifying the installed ha-mcp package. The file lives in the
++        # persistent HA_MCP_CONFIG_DIR and is mirrored from the Home PC Git repo.
++        local_instructions_path = Path(self._config_dir) / "local_instructions.md"
++        try:
++            local_instructions = local_instructions_path.read_text(
++                encoding="utf-8"
++            ).strip()
++        except FileNotFoundError:
++            local_instructions = ""
++        except OSError as err:
++            _LOGGER.warning(
++                "Could not read local HA-MCP instructions from %s: %s",
++                local_instructions_path,
++                err,
++            )
++            local_instructions = ""
++
++        if local_instructions:
++            base_instructions = (server.mcp.instructions or "").strip()
++            server.mcp.instructions = (
++                f"{base_instructions}\n\n{local_instructions}"
++                if base_instructions
++                else local_instructions
++            )
++            _LOGGER.info(
++                "Loaded local HA-MCP instructions from %s",
++                local_instructions_path,
++            )

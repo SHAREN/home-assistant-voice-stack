@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax-and-regressions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Python syntax
+        run: |
+          python -m py_compile addons/pipecat_assist_proxy/app/main.py
+          python -m py_compile addons/pipecat_assist_proxy/app/audio_debug.py
+          python -m py_compile addons/pipecat_assist_proxy/app/mcp_bridge.py
+          python -m py_compile addons/pipecat_assist_proxy/app/session_memory.py
+          python -m py_compile addons/pipecat_assist_proxy/app/conversation_log.py
+
+      - name: P610 static regression checks
+        run: |
+          python - <<'PY'
+          import runpy
+          for path in [
+              'tests/test_p610_pipecat_local_audio.py',
+              'tests/test_p610_session_audio_debug.py',
+          ]:
+              namespace = runpy.run_path(path)
+              for name, obj in sorted(namespace.items()):
+                  if name.startswith('test_') and callable(obj):
+                      obj()
+                      print('PASS', path, name)
+          PY
+
+      - name: JavaScript syntax
+        run: |
+          node --check lovelace/pipecat-assist-card-v5.js
+          node --check tests/test_p610_live_observer_state.mjs

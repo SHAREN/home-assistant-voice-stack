@@ -1,0 +1,5 @@
+{
+  "name": "Home Assistant Voice Stack",
+  "render_readme": true,
+  "domains": ["pipecat_assist"]
+}

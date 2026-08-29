@@ -1,0 +1,53 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*token*
+secrets/
+credentials/
+
+# Runtime and user data
+conversation_logs/
+recordings/
+voice_debug/
+*.wav
+!experimental/gemini_live/assets/offline_network_ru.wav
+!addons/pipecat_assist_proxy/sounds/session_end.wav
+*.mp3
+*.ogg
+*.opus
+*.webm
+*.log
+*.pid
+
+# Python / Node caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+
+# Home Assistant runtime/storage
+.storage/
+*.db
+*.db-shm
+*.db-wal
+
+# Backups and generated files
+*.before-*
+*.bak
+*.backup
+*~
+e2e_response.*
+e2e_prompt.*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,16 @@
+{
+  "views": [
+    {
+      "title": "P610 Live",
+      "path": "p610-live",
+      "icon": "mdi:speaker-wireless",
+      "type": "panel",
+      "cards": [
+        {
+          "type": "custom:p610-live-observer-card",
+          "name": "P610 Live"
+        }
+      ]
+    }
+  ]
+}

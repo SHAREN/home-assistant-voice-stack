@@ -1,0 +1,5 @@
+apps/assist_satellite_session_end/rootfs/** text eol=lf
+experimental/gemini_live/** text eol=lf
+experimental/gemini_live/assets/*.wav -text
+experimental/gemini_live/brand/*.png -text
+lovelace/p610-live.dashboard.json text eol=lf

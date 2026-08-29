@@ -1,0 +1,11 @@
+Home Assistant Voice Stack
+
+This project is derived from:
+  kyvaith/pipecat-homeassistant
+  https://github.com/kyvaith/pipecat-homeassistant
+
+The upstream project is distributed under the MIT License.
+
+The runtime also uses Pipecat by Daily and other third-party projects. Those dependencies retain their own licenses and copyright notices.
+
+Wake-word models, Home Assistant assets, and bundled dependency artifacts may carry their own upstream licensing terms. See adjacent license files and the originating projects where applicable.
