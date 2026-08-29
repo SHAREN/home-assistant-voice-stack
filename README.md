@@ -194,6 +194,7 @@ See [docs/UPDATING.md](docs/UPDATING.md).
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Updating and rollback](docs/UPDATING.md)
 - [Security](docs/SECURITY.md)
+- [Roadmap](docs/ROADMAP.md)
 - [Russian guide](docs/README.ru.md)
 
 ## Upstream and licenses
