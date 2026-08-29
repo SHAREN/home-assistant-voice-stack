@@ -9,14 +9,17 @@ The active Pipecat/P610 path plays assistant PCM through pacat/PulseAudio, but i
 Planned implementation:
 
 - expose the active P610 PulseAudio sink through the current Pipecat Assist integration;
-- create a media_player entity with device_class speaker;
+- create a volume-only media_player entity with device_class speaker;
 - support volume_level readback;
 - support media_player.volume_set;
 - support volume_up / volume_down;
 - support volume_mute;
+- do not expose play, pause, stop, play_media, TTS, source selection, browsing, or any other media-start capability;
+- changing volume or mute must never start playback or inject audio into the P610 output path;
+- the entity exists only as a Home Assistant control surface for the sink already used by Pipecat/pacat;
 - keep microphone gain as a separate control from speaker playback volume;
 - preserve full-duplex/barge-in behavior;
 - expose the selected sink and current volume in Pipecat status/debug data;
-- add regression tests so changing volume cannot restart or interrupt the realtime pipeline.
+- add regression tests so changing volume cannot restart or interrupt the realtime pipeline and cannot start audio playback.
 
 The control should target the PulseAudio sink used by pacat, not the retired Assist Satellite media player.
