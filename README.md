@@ -21,6 +21,9 @@ Russian setup guide: [docs/README.ru.md](docs/README.ru.md)
 - Session audio debugging with separate microphone, Gemini input, raw assistant, played assistant, stereo mix, and timeline files.
 - 24-hour debug-audio retention by default.
 - Workaround for Gemini Live idle WebSocket closes that would otherwise accumulate as false fatal failures in Pipecat 1.4.0.
+- P610 provider-readiness self-healing: a stale Gemini realtime-input latch is recovered locally and only the P610 worker is recycled if recovery fails.
+- Model-driven `end_conversation` tool: explicit semantic requests to end the voice session close it after a short farewell rather than relying on a phrase list.
+- Optional `thinking_signal` cue for genuinely slow multi-tool/search work, without adding a spoken filler response.
 - Optional microphone monitor for checking the P610 capture level and routing.
 
 ## Supported entry points
@@ -129,6 +132,8 @@ See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the complete setup sequence
 6. Gemini can call Home Assistant MCP tools and stream audio back.
 7. Assistant PCM is played with pacat/PulseAudio and a small jitter buffer.
 8. A local Stop detection interrupts output, ends the conversation, and immediately creates a fresh warm standby session.
+9. If the user explicitly asks to end the voice conversation semantically, the model can call `end_conversation`; the runtime waits for the short farewell audio, plays the end cue, then warms a fresh standby session.
+10. If Gemini realtime input is unexpectedly not ready at wake or during an active turn, the P610 path preserves the activation buffer, attempts local provider recovery, and recycles only the P610 worker if readiness cannot be restored.
 
 Current P610 defaults in this release include approximately:
 

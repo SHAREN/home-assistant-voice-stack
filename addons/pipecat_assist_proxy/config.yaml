@@ -1,7 +1,7 @@
 name: Pipecat Assist Proxy
-version: "0.1.75-proxy23"
+version: "0.1.75-proxy26"
 slug: pipecat_assist_proxy
-description: Full-duplex Gemini Live voice assistant for Home Assistant with browser WebRTC, optional P610 local audio, wake word, MCP tools, and session diagnostics.
+description: Full-duplex Gemini Live voice assistant for Home Assistant with browser WebRTC, optional P610 local audio, wake word, MCP tools, session diagnostics, and self-healing standby.
 url: https://github.com/SHAREN/home-assistant-voice-stack
 arch:
   - aarch64

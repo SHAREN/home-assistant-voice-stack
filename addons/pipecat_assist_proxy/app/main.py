@@ -148,9 +148,17 @@ TTS_MEDIA_TYPES = {
     "wav": "audio/wav",
 }
 CONVERSATION_END_SYSTEM_HINT = (
-    "If the user clearly ends the conversation, briefly acknowledge it and do not ask "
-    "a follow-up question. The client will close the microphone after your farewell."
+    "Если ты по смыслу понимаешь, что пользователь ЯВНО просит закончить, закрыть или прекратить "
+    "именно текущий голосовой диалог/прослушивание, вызови инструмент end_conversation ровно один раз. "
+    "Решение принимаешь ты по смыслу и контексту, а не по списку ключевых фраз. Не вызывай его просто "
+    "после выполненной команды, из-за паузы, обычного «спасибо», и не путай с просьбой остановить музыку, "
+    "вентиляцию, таймер или другое устройство. После успешного end_conversation скажи одно очень короткое "
+    "прощание без вопроса; клиент сам закроет микрофон после твоего аудио. Если заранее понимаешь, что ответ "
+    "потребует заметного ожидания из-за поиска, нескольких инструментов или нетривиального анализа, один раз "
+    "вызови thinking_signal перед такой работой: он даёт короткий невербальный щелчок. Для простых прямых команд "
+    "вроде включить/выключить известный свет thinking_signal не вызывай — выполняй их сразу."
 )
+
 HA_STT_BRIDGE_KINDS = {
     "deepgram",
     "gemini",
@@ -199,6 +207,7 @@ P610_WAKE_MODEL_CONFIG = Path("/app/wakewords/okay_nabu.json")
 P610_STOP_MODEL_CONFIG = Path("/app/wakewords/stop.json")
 P610_WAKE_CUE_PATH = Path("/app/sounds/wake_word_triggered.flac")
 P610_END_CUE_PATH = Path("/app/sounds/session_end.wav")
+P610_THINKING_CUE_PATH = Path("/app/sounds/thinking.wav")
 
 
 def _p610_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -229,9 +238,13 @@ class P610WakeGate:
         self.active = False
         self.cue_playing = False
         self.end_cue_requested = False
+        self.model_end_pending = False
+        self.model_end_reason = ""
+        self.model_end_requested_at = 0.0
         self.audio_debug = None
         self.recycle_callback = None
         self.provider_ready_callback = None
+        self.provider_recover_callback = None
         self.pre_roll_seconds = _p610_env_float("P610_AUDIO_PREROLL_SECONDS", 2.0, 0.0, 5.0)
         self.command_overlap_seconds = _p610_env_float("P610_COMMAND_OVERLAP_SECONDS", 0.4, 0.0, 1.0)
         self.cue_decision_seconds = _p610_env_float("P610_CUE_DECISION_SECONDS", 0.90, 0.05, 1.5)
@@ -272,8 +285,14 @@ class P610WakeGate:
                 "buffered_input_bytes": 0,
                 "wake_count": 0,
                 "stop_count": 0,
+                "model_end_count": 0,
                 "last_wake_at": None,
                 "last_stop_at": None,
+                "last_model_end_at": None,
+                "last_model_end_reason": "",
+                "model_end_pending": False,
+                "thinking_cue_count": 0,
+                "last_thinking_cue_at": None,
                 "wake_cue_ready": True,
                 "wake_cue_path": str(P610_WAKE_CUE_PATH),
                 "end_cue_ready": True,
@@ -288,8 +307,38 @@ class P610WakeGate:
                 "last_assistant_audio_at": None,
                 "last_provider_error": "",
                 "last_provider_error_at": None,
+                "provider_input_ready": False,
+                "provider_input_ready_checked_at": None,
+                "provider_recovery_count": 0,
+                "provider_force_reconnect_count": 0,
+                "last_provider_recovery_at": None,
             }
         )
+
+    def request_model_end(self, reason: str = "") -> bool:
+        if not self.active or self.model_end_pending:
+            return False
+        clean_reason = " ".join(str(reason or "").split())[:240]
+        self.model_end_pending = True
+        self.model_end_reason = clean_reason
+        self.model_end_requested_at = time.time()
+        P610_LOCAL_AUDIO_STATE["model_end_pending"] = True
+        P610_LOCAL_AUDIO_STATE["last_model_end_reason"] = clean_reason
+        P610_LOCAL_AUDIO_STATE["last_model_end_requested_at"] = self.model_end_requested_at
+        return True
+
+    def complete_model_end(self) -> None:
+        if not self.model_end_pending:
+            return
+        self.model_end_pending = False
+        self.active = False
+        self.clear_activation_buffer()
+        P610_LOCAL_AUDIO_STATE["model_end_pending"] = False
+        P610_LOCAL_AUDIO_STATE["conversation_active"] = False
+        P610_LOCAL_AUDIO_STATE["model_end_count"] = int(
+            P610_LOCAL_AUDIO_STATE.get("model_end_count") or 0
+        ) + 1
+        P610_LOCAL_AUDIO_STATE["last_model_end_at"] = time.time()
 
     @staticmethod
     def _frame_duration(frame: InputAudioRawFrame) -> float:
@@ -300,10 +349,14 @@ class P610WakeGate:
     def provider_ready(self) -> bool:
         if self.provider_ready_callback:
             try:
-                return bool(self.provider_ready_callback())
+                ready = bool(self.provider_ready_callback())
             except Exception:
-                return False
-        return P610_LOCAL_AUDIO_STATE.get("standby_state") == "ready"
+                ready = False
+        else:
+            ready = P610_LOCAL_AUDIO_STATE.get("standby_state") == "ready"
+        P610_LOCAL_AUDIO_STATE["provider_input_ready"] = ready
+        P610_LOCAL_AUDIO_STATE["provider_input_ready_checked_at"] = time.time()
+        return ready
 
     def remember_pre_roll(self, frame: InputAudioRawFrame) -> None:
         duration = self._frame_duration(frame)
@@ -342,6 +395,7 @@ class P610WakeGate:
         self.cue_decision_pending = True
         self.continuation_detected = False
         self._wake_detected_monotonic = time.monotonic()
+        P610_LOCAL_AUDIO_STATE["activation_buffer_overflow"] = False
         P610_LOCAL_AUDIO_STATE["activation_buffer_started_at"] = time.time()
         P610_LOCAL_AUDIO_STATE["wake_cue_skipped_for_continuation"] = False
         self._update_buffer_metrics()
@@ -363,6 +417,16 @@ class P610WakeGate:
         # is still unavailable beyond the cap, keep the earliest command audio
         # and stop growing the queue rather than evicting the user's first words.
         if self._pending_duration + duration > self.activation_buffer_max_seconds:
+            if P610_LOCAL_AUDIO_STATE.get("activation_buffer_overflow") is not True:
+                P610_LOCAL_AUDIO_STATE["activation_buffer_overflow_count"] = int(
+                    P610_LOCAL_AUDIO_STATE.get("activation_buffer_overflow_count") or 0
+                ) + 1
+                P610_LOCAL_AUDIO_STATE["last_activation_buffer_overflow_at"] = time.time()
+                if self.audio_debug and self.audio_debug.capture_started:
+                    self.audio_debug.record_event(
+                        "activation_buffer_overflow",
+                        {"buffered_seconds": round(self._pending_duration, 3)},
+                    )
             P610_LOCAL_AUDIO_STATE["activation_buffer_overflow"] = True
             return
         self._pending_frames.append(frame)
@@ -372,8 +436,12 @@ class P610WakeGate:
     def drain_activation_buffer(self) -> list[InputAudioRawFrame]:
         frames = list(self._pending_frames)
         total_bytes = sum(len(frame.audio) for frame in frames)
+        overflowed = P610_LOCAL_AUDIO_STATE.get("activation_buffer_overflow") is True
         self._pending_frames.clear()
         self._pending_duration = 0.0
+        if overflowed:
+            P610_LOCAL_AUDIO_STATE["last_activation_buffer_overflow_recovered_at"] = time.time()
+        P610_LOCAL_AUDIO_STATE["activation_buffer_overflow"] = False
         P610_LOCAL_AUDIO_STATE["last_activation_buffer_flush_frames"] = len(frames)
         P610_LOCAL_AUDIO_STATE["last_activation_buffer_flush_bytes"] = total_bytes
         P610_LOCAL_AUDIO_STATE["last_activation_buffer_flush_at"] = time.time()
@@ -387,6 +455,7 @@ class P610WakeGate:
     def clear_activation_buffer(self) -> None:
         self._pending_frames.clear()
         self._pending_duration = 0.0
+        P610_LOCAL_AUDIO_STATE["activation_buffer_overflow"] = False
         self.cue_decision_pending = False
         self.continuation_detected = False
         self._pre_roll_frames.clear()
@@ -412,6 +481,8 @@ class P610WakeGate:
                 if self._stop_model.process_streaming(features):
                     self.active = False
                     self.end_cue_requested = True
+                    self.model_end_pending = False
+                    P610_LOCAL_AUDIO_STATE["model_end_pending"] = False
                     self.clear_activation_buffer()
                     P610_LOCAL_AUDIO_STATE["conversation_active"] = False
                     P610_LOCAL_AUDIO_STATE["stop_count"] = int(P610_LOCAL_AUDIO_STATE.get("stop_count") or 0) + 1
@@ -447,6 +518,93 @@ class P610WakeInputGateProcessor(FrameProcessor):
         super().__init__()
         self._gate = gate
         self._audio_debug = audio_debug
+        self._provider_recovery_task: asyncio.Task | None = None
+        self._session_started_at = P610_LOCAL_AUDIO_STATE.get("started_at")
+
+    def _same_p610_session(self) -> bool:
+        return P610_LOCAL_AUDIO_STATE.get("started_at") == self._session_started_at
+
+    def _mark_provider_recovered(self, reason: str) -> None:
+        if not self._same_p610_session():
+            return
+        P610_LOCAL_AUDIO_STATE["provider_healthy"] = True
+        P610_LOCAL_AUDIO_STATE["provider_input_ready"] = True
+        P610_LOCAL_AUDIO_STATE["standby_state"] = "ready"
+        P610_LOCAL_AUDIO_STATE["last_provider_recovery_at"] = time.time()
+        P610_LOCAL_AUDIO_STATE["last_provider_recovery_reason"] = reason
+        P610_LOCAL_AUDIO_STATE["last_provider_error"] = ""
+        if self._audio_debug and self._audio_debug.capture_started:
+            self._audio_debug.record_event("provider_recovered", {"reason": reason})
+
+    def _ensure_provider_recovery(self, reason: str) -> None:
+        if not self._same_p610_session() or self._gate.provider_ready():
+            return
+        task = self._provider_recovery_task
+        if task and not task.done():
+            return
+        self._provider_recovery_task = asyncio.create_task(
+            self._recover_provider(reason), name="p610-active-provider-recovery"
+        )
+
+    async def _recover_provider(self, reason: str) -> None:
+        if not self._same_p610_session():
+            return
+        P610_LOCAL_AUDIO_STATE["provider_recovery_count"] = int(
+            P610_LOCAL_AUDIO_STATE.get("provider_recovery_count") or 0
+        ) + 1
+        P610_LOCAL_AUDIO_STATE["provider_recovery_started_at"] = time.time()
+        P610_LOCAL_AUDIO_STATE["provider_recovery_reason"] = reason
+        P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+        P610_LOCAL_AUDIO_STATE["standby_state"] = "recovering"
+        if self._audio_debug and self._audio_debug.capture_started:
+            self._audio_debug.record_event("provider_recovery_started", {"reason": reason})
+
+        # Normal Gemini idle rotation usually reconnects in well under a second.
+        # Preserve the user's activation buffer and give that automatic reconnect
+        # a short chance before forcing anything.
+        auto_deadline = time.monotonic() + 1.5
+        while self._same_p610_session() and time.monotonic() < auto_deadline:
+            if self._gate.provider_ready():
+                self._mark_provider_recovered("automatic_reconnect")
+                return
+            await asyncio.sleep(0.05)
+
+        # If the private Gemini realtime-ready latch stayed false, force only
+        # this P610 Gemini service to reconnect. The microphone buffer remains
+        # intact and browser/WebRTC workers are untouched.
+        if self._same_p610_session() and self._gate.provider_recover_callback:
+            P610_LOCAL_AUDIO_STATE["provider_force_reconnect_count"] = int(
+                P610_LOCAL_AUDIO_STATE.get("provider_force_reconnect_count") or 0
+            ) + 1
+            P610_LOCAL_AUDIO_STATE["last_provider_force_reconnect_at"] = time.time()
+            try:
+                await self._gate.provider_recover_callback()
+            except Exception as err:
+                P610_LOCAL_AUDIO_STATE["last_provider_recovery_error"] = str(err)[:1000]
+                logger.exception("P610 forced Gemini reconnect failed: {}", err)
+
+        forced_deadline = time.monotonic() + 6.0
+        while self._same_p610_session() and time.monotonic() < forced_deadline:
+            if self._gate.provider_ready():
+                self._mark_provider_recovered("forced_reconnect")
+                return
+            await asyncio.sleep(0.05)
+
+        if not self._same_p610_session():
+            return
+        P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+        P610_LOCAL_AUDIO_STATE["standby_state"] = "degraded"
+        P610_LOCAL_AUDIO_STATE["last_provider_error"] = (
+            "Gemini realtime input did not become ready after automatic + forced P610 recovery"
+        )
+        P610_LOCAL_AUDIO_STATE["last_provider_error_at"] = time.time()
+        if self._audio_debug and self._audio_debug.capture_started:
+            self._audio_debug.record_event(
+                "provider_recovery_failed", {"reason": reason, "action": "p610_worker_recycle"}
+            )
+        logger.error("P610 Gemini readiness recovery failed; recycling only the P610 worker")
+        if self._gate.recycle_callback:
+            self._gate.recycle_callback()
 
     async def _play_wake_cue(self) -> None:
         try:
@@ -514,12 +672,13 @@ class P610WakeInputGateProcessor(FrameProcessor):
         event = self._gate.process_audio(frame.audio)
         if event == "wake":
             self._gate.begin_activation_buffer()
+            provider_ready_at_wake = self._gate.provider_ready()
             if self._audio_debug:
                 origin = time.monotonic() - self._gate.command_overlap_seconds
                 self._audio_debug.start_capture(origin_monotonic=origin, reason="wake")
                 self._audio_debug.record_event("wake", {
                     "word": "Okay Nabu",
-                    "provider_ready": self._gate.provider_ready(),
+                    "provider_ready": provider_ready_at_wake,
                     "command_overlap_seconds": self._gate.command_overlap_seconds,
                 })
                 for debug_frame in self._gate._pending_frames:
@@ -527,6 +686,9 @@ class P610WakeInputGateProcessor(FrameProcessor):
             logger.info(
                 "P610 local wake word detected: Okay Nabu; waiting briefly for continuous command"
             )
+            if not provider_ready_at_wake:
+                logger.warning("P610 woke while Gemini realtime input was not ready; starting local recovery")
+                self._ensure_provider_recovery("wake_provider_not_ready")
             asyncio.create_task(self._decide_wake_cue(), name="p610-wake-cue-decision")
             return
         if event == "stop":
@@ -550,10 +712,12 @@ class P610WakeInputGateProcessor(FrameProcessor):
             # forward the speaker's own cue echo into Gemini.
             return
 
-        if not self._gate.provider_ready() or self._gate._pending_frames:
+        provider_ready_now = self._gate.provider_ready()
+        if not provider_ready_now or self._gate._pending_frames:
             if not self._gate._pending_frames or self._gate._pending_frames[-1] is not frame:
                 self._gate.buffer_activation_frame(frame)
-            if not self._gate.provider_ready():
+            if not provider_ready_now:
+                self._ensure_provider_recovery("active_turn_provider_not_ready")
                 return
             pending = self._gate.drain_activation_buffer()
             logger.info(
@@ -785,7 +949,21 @@ class P610WakeOutputGateProcessor(FrameProcessor):
                     "max_gap_ms": P610_LOCAL_AUDIO_STATE.get("last_response_max_gap_ms"),
                     "gap_200ms": P610_LOCAL_AUDIO_STATE.get("last_response_gap_200ms"),
                 })
+            model_end = bool(
+                self._gate.model_end_pending
+                and float(P610_LOCAL_AUDIO_STATE.get("last_assistant_audio_played_at") or 0.0)
+                >= float(self._gate.model_end_requested_at or 0.0)
+            )
             await self.push_frame(frame, direction)
+            if model_end:
+                reason = self._gate.model_end_reason
+                self._gate.complete_model_end()
+                logger.info("P610 model-requested conversation end completed after farewell: {}", reason)
+                if self._audio_debug and self._audio_debug.capture_started:
+                    self._audio_debug.record_event("model_end_completed", {"reason": reason})
+                await self._play_end_cue()
+                if self._gate.recycle_callback:
+                    self._gate.recycle_callback()
             return
 
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, InterruptionFrame):
@@ -3938,7 +4116,7 @@ async def _p610_local_audio_supervisor() -> None:
                 P610_LOCAL_AUDIO_STATE["recycle_count"] = int(P610_LOCAL_AUDIO_STATE.get("recycle_count") or 0) + 1
                 P610_LOCAL_AUDIO_STATE["last_recycle_at"] = time.time()
                 P610_LOCAL_AUDIO_STATE["standby_state"] = "warming"
-                logger.info("P610 conversation ended by Stop; immediately warming a fresh standby session")
+                logger.info("P610 conversation ended; immediately warming a fresh standby session")
                 continue
             raise RuntimeError("P610 local audio session ended unexpectedly")
         except asyncio.CancelledError:
@@ -3946,7 +4124,7 @@ async def _p610_local_audio_supervisor() -> None:
                 P610_LOCAL_AUDIO_STATE["recycle_count"] = int(P610_LOCAL_AUDIO_STATE.get("recycle_count") or 0) + 1
                 P610_LOCAL_AUDIO_STATE["last_recycle_at"] = time.time()
                 P610_LOCAL_AUDIO_STATE["standby_state"] = "warming"
-                logger.info("P610 conversation cancelled by Stop; immediately warming a fresh standby session")
+                logger.info("P610 conversation cancelled; immediately warming a fresh standby session")
                 continue
             raise
         except Exception as err:
@@ -4967,6 +5145,101 @@ def _effective_instructions(flow: FlowConfig) -> str:
             '"Please hold, I\'m checking." Then run the search and answer briefly.'
         )
     return instructions
+
+
+async def _play_p610_thinking_cue(gate: P610WakeGate) -> None:
+    if not gate.active or not P610_THINKING_CUE_PATH.is_file():
+        return
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "mpv",
+            "--no-config",
+            "--no-video",
+            "--really-quiet",
+            "--audio-display=no",
+            str(P610_THINKING_CUE_PATH),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return_code = await process.wait()
+        P610_LOCAL_AUDIO_STATE["last_thinking_cue_ok"] = return_code == 0
+        P610_LOCAL_AUDIO_STATE["last_thinking_cue_return_code"] = return_code
+        P610_LOCAL_AUDIO_STATE["last_thinking_cue_at"] = time.time()
+    except Exception as err:
+        P610_LOCAL_AUDIO_STATE["last_thinking_cue_ok"] = False
+        P610_LOCAL_AUDIO_STATE["last_thinking_cue_error"] = str(err)
+        logger.warning("P610 thinking cue failed: {}", err)
+
+
+def _p610_end_conversation_tool_schema(gate: P610WakeGate | None) -> FunctionSchema | None:
+    if gate is None:
+        return None
+
+    async def handler(params) -> None:
+        reason = " ".join(str((params.arguments or {}).get("reason", "")).split())[:240]
+        accepted = gate.request_model_end(reason)
+        if accepted:
+            logger.info("P610 end_conversation requested by model: {}", reason or "explicit user intent")
+            if gate.audio_debug and gate.audio_debug.capture_started:
+                gate.audio_debug.record_event("model_end_requested", {"reason": reason})
+        await params.result_callback(
+            json.dumps(
+                {
+                    "success": accepted,
+                    "instruction": (
+                        "Say one very short farewell now, without a question or more tools. "
+                        "The P610 session will close after your farewell audio."
+                    ) if accepted else "No active P610 conversation was available to close.",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    return FunctionSchema(
+        name="end_conversation",
+        description=(
+            "Call only when you decide from meaning and context that the user explicitly wants to end, close, "
+            "or stop the current voice conversation/listening session; never use it for stopping a device, media, "
+            "timer, or merely because a normal command is complete."
+        ),
+        properties={
+            "reason": {
+                "type": "string",
+                "description": "Short semantic reason why the user's intent is to end this voice session.",
+            }
+        },
+        required=[],
+        handler=handler,
+    )
+
+
+def _p610_thinking_signal_tool_schema(gate: P610WakeGate | None) -> FunctionSchema | None:
+    if gate is None:
+        return None
+
+    async def handler(params) -> None:
+        if gate.active:
+            P610_LOCAL_AUDIO_STATE["thinking_cue_count"] = int(
+                P610_LOCAL_AUDIO_STATE.get("thinking_cue_count") or 0
+            ) + 1
+            P610_LOCAL_AUDIO_STATE["last_thinking_cue_requested_at"] = time.time()
+            if gate.audio_debug and gate.audio_debug.capture_started:
+                gate.audio_debug.record_event("thinking_cue_requested", {})
+            asyncio.create_task(_play_p610_thinking_cue(gate), name="p610-thinking-cue")
+            await params.result_callback('{"success":true}')
+            return
+        await params.result_callback('{"success":false,"reason":"conversation_not_active"}')
+
+    return FunctionSchema(
+        name="thinking_signal",
+        description=(
+            "Call once before work that you expect will leave the user waiting over about one second because it "
+            "needs search, multiple tools, or nontrivial analysis; never call it for a simple direct device command."
+        ),
+        properties={},
+        required=[],
+        handler=handler,
+    )
 
 
 def _web_search_tool_schema(config: RuntimeConfig, flow: FlowConfig) -> FunctionSchema | None:
@@ -5998,7 +6271,15 @@ async def run_bot(
             bridge = None
             raise RuntimeError(f"MCP tools are enabled but unavailable: {err}") from err
 
-    local_tool_schemas = [schema for schema in [_web_search_tool_schema(config, flow)] if schema]
+    local_tool_schemas = [
+        schema
+        for schema in [
+            _web_search_tool_schema(config, flow),
+            _p610_end_conversation_tool_schema(p610_wake_gate),
+            _p610_thinking_signal_tool_schema(p610_wake_gate),
+        ]
+        if schema
+    ]
     tools_schema = _merge_tools_schema(mcp_tools_schema, local_tool_schemas)
     context_for_memory = None
     audio_debug = None
@@ -6149,9 +6430,19 @@ async def run_bot(
                 P610_LOCAL_AUDIO_STATE["recycle_requested"] = True
                 P610_LOCAL_AUDIO_STATE["standby_state"] = "recycling"
                 P610_LOCAL_AUDIO_STATE["recycle_requested_at"] = time.time()
-                asyncio.create_task(worker.cancel(), name="p610-stop-recycle")
+                asyncio.create_task(worker.cancel(), name="p610-worker-recycle")
 
             p610_wake_gate.recycle_callback = _request_p610_recycle
+
+            async def _force_p610_provider_reconnect() -> bool:
+                if getattr(llm, "_ready_for_realtime_input", False):
+                    return True
+                P610_LOCAL_AUDIO_STATE["last_provider_force_reconnect_requested_at"] = time.time()
+                logger.warning("P610 forcing Gemini reconnect because realtime input readiness stayed false")
+                await llm._reconnect()
+                return bool(getattr(llm, "_ready_for_realtime_input", False))
+
+            p610_wake_gate.provider_recover_callback = _force_p610_provider_reconnect
 
             async def _mark_p610_provider_ready() -> None:
                 deadline = time.monotonic() + 20.0
@@ -6160,11 +6451,74 @@ async def run_bot(
                         P610_LOCAL_AUDIO_STATE["standby_state"] = "ready"
                         P610_LOCAL_AUDIO_STATE["standby_ready_at"] = time.time()
                         P610_LOCAL_AUDIO_STATE["provider_healthy"] = True
+                        P610_LOCAL_AUDIO_STATE["provider_input_ready"] = True
+                        P610_LOCAL_AUDIO_STATE["provider_input_ready_checked_at"] = time.time()
                         logger.info("P610 fresh Gemini standby is context-primed and ready")
                         return
                     await asyncio.sleep(0.05)
+                P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                P610_LOCAL_AUDIO_STATE["provider_input_ready"] = False
                 P610_LOCAL_AUDIO_STATE["standby_state"] = "degraded"
                 logger.warning("P610 Gemini standby did not become ready within 20s")
+
+            async def _monitor_p610_provider_readiness() -> None:
+                # Keep public status synchronized with the private Gemini input-ready
+                # latch across every idle WebSocket reconnect. If an idle reconnect
+                # gets stuck while no conversation is active, recycle only this P610
+                # worker before the next wake word can land on a dead standby.
+                session_started_at = P610_LOCAL_AUDIO_STATE.get("started_at")
+                seen_ready = False
+                not_ready_since: float | None = None
+                warned_stuck = False
+                while (
+                    P610_LOCAL_AUDIO_STATE.get("running") is True
+                    and P610_LOCAL_AUDIO_STATE.get("started_at") == session_started_at
+                    and not P610_LOCAL_AUDIO_STATE.get("recycle_requested")
+                ):
+                    ready = p610_wake_gate.provider_ready()
+                    if ready:
+                        if not_ready_since is not None:
+                            elapsed = time.monotonic() - not_ready_since
+                            if elapsed >= 0.5:
+                                logger.info(
+                                    "P610 Gemini realtime readiness recovered after {:.2f}s", elapsed
+                                )
+                            P610_LOCAL_AUDIO_STATE["last_provider_reconnect_duration_ms"] = round(
+                                elapsed * 1000, 1
+                            )
+                            P610_LOCAL_AUDIO_STATE["last_provider_recovery_at"] = time.time()
+                        seen_ready = True
+                        not_ready_since = None
+                        warned_stuck = False
+                        P610_LOCAL_AUDIO_STATE["provider_healthy"] = True
+                        if not p610_wake_gate.active:
+                            P610_LOCAL_AUDIO_STATE["standby_state"] = "ready"
+                    elif seen_ready:
+                        if not_ready_since is None:
+                            not_ready_since = time.monotonic()
+                            P610_LOCAL_AUDIO_STATE["provider_not_ready_since_at"] = time.time()
+                            P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                            if not p610_wake_gate.active:
+                                P610_LOCAL_AUDIO_STATE["standby_state"] = "reconnecting"
+                        elapsed = time.monotonic() - not_ready_since
+                        if elapsed >= 2.0 and not warned_stuck:
+                            warned_stuck = True
+                            logger.warning(
+                                "P610 Gemini realtime input still not ready after {:.1f}s", elapsed
+                            )
+                        if not p610_wake_gate.active and elapsed >= 4.0:
+                            P610_LOCAL_AUDIO_STATE["standby_state"] = "degraded"
+                            P610_LOCAL_AUDIO_STATE["last_provider_error"] = (
+                                "Gemini realtime input readiness stuck false in standby"
+                            )
+                            P610_LOCAL_AUDIO_STATE["last_provider_error_at"] = time.time()
+                            logger.error(
+                                "P610 standby Gemini readiness stuck for {:.1f}s; recycling only P610 worker",
+                                elapsed,
+                            )
+                            _request_p610_recycle()
+                            return
+                    await asyncio.sleep(0.10)
 
         if provider_kind == "gemini":
             @worker.event_handler("on_pipeline_started")
@@ -6179,6 +6533,9 @@ async def run_bot(
                 asyncio.create_task(llm._handle_context(context), name="gemini-quiet-context-prime")
                 if p610_wake_gate:
                     asyncio.create_task(_mark_p610_provider_ready(), name="p610-provider-ready")
+                    asyncio.create_task(
+                        _monitor_p610_provider_readiness(), name="p610-provider-readiness-monitor"
+                    )
 
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):

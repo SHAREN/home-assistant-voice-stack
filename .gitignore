@@ -17,6 +17,7 @@ voice_debug/
 *.wav
 !experimental/gemini_live/assets/offline_network_ru.wav
 !addons/pipecat_assist_proxy/sounds/session_end.wav
+!addons/pipecat_assist_proxy/sounds/thinking.wav
 *.mp3
 *.ogg
 *.opus

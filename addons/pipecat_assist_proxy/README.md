@@ -10,7 +10,9 @@ Key optional P610 features:
 
 - local Okay Nabu wake word;
 - local Stop command;
-- warm Gemini standby;
+- warm Gemini standby with local readiness recovery;
 - pre-roll / activation buffering;
+- model-driven semantic conversation end after a short farewell;
+- optional nonverbal thinking cue for slow multi-tool/search work;
 - pacat/PulseAudio streaming output;
 - 24-hour session audio debugging.
