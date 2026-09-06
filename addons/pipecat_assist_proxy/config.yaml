@@ -1,8 +1,8 @@
 name: Pipecat Assist Proxy
-version: "0.1.75-proxy26"
+version: "0.1.75-proxy28"
 slug: pipecat_assist_proxy
-description: Full-duplex Gemini Live voice assistant for Home Assistant with browser WebRTC, optional P610 local audio, wake word, MCP tools, session diagnostics, and self-healing standby.
-url: https://github.com/SHAREN/home-assistant-voice-stack
+description: Pipecat Assist with Gemini proxy, persistent logs, MCP traces, remote WebRTC ICE/STUN, self-healing P610 standby, and a active-turn-safe Gemini Live reconnect workaround, 30s P610 active-session idle timeout, persistent logs, MCP traces, and remote WebRTC diagnostics.
+url: https://github.com/kyvaith/pipecat-homeassistant
 arch:
   - aarch64
   - amd64
@@ -20,13 +20,15 @@ hassio_role: manager
 options:
   runner_port: 7861
   log_level: "INFO"
-  gemini_proxy_url: ""
-  p610_local_audio: false
+  gemini_proxy_url: "http://45.87.107.117:39731"
+  p610_local_audio: true
   p610_flow_id: "home-default"
   p610_wake_threshold: 0.6
   p610_stop_threshold: 0.5
   p610_refractory_seconds: 2.0
   p610_stop_guard_seconds: 0.5
+  p610_gemini_proactive_reconnect_seconds: 120.0
+  p610_active_idle_timeout_seconds: 30
 schema:
   runner_port: port
   log_level: list(DEBUG|INFO|WARNING|ERROR)
@@ -37,3 +39,5 @@ schema:
   p610_stop_threshold: float
   p610_refractory_seconds: float
   p610_stop_guard_seconds: float
+  p610_gemini_proactive_reconnect_seconds: float
+  p610_active_idle_timeout_seconds: int

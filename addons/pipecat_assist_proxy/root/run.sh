@@ -11,6 +11,8 @@ P610_WAKE_THRESHOLD="$(bashio::config 'p610_wake_threshold')"
 P610_STOP_THRESHOLD="$(bashio::config 'p610_stop_threshold')"
 P610_REFRACTORY_SECONDS="$(bashio::config 'p610_refractory_seconds')"
 P610_STOP_GUARD_SECONDS="$(bashio::config 'p610_stop_guard_seconds')"
+P610_ACTIVE_IDLE_TIMEOUT_SECONDS="$(bashio::config 'p610_active_idle_timeout_seconds')"
+P610_GEMINI_PROACTIVE_RECONNECT_SECONDS="$(bashio::config 'p610_gemini_proactive_reconnect_seconds')"
 P610_METADATA_STALE="false"
 if [[ -z "$P610_LOCAL_AUDIO_ENABLED" || "$P610_LOCAL_AUDIO_ENABLED" == "null" ]]; then
     P610_METADATA_STALE="true"
@@ -31,6 +33,12 @@ fi
 if [[ -z "$P610_STOP_GUARD_SECONDS" || "$P610_STOP_GUARD_SECONDS" == "null" ]]; then
     P610_STOP_GUARD_SECONDS="0.5"
 fi
+if [[ -z "$P610_ACTIVE_IDLE_TIMEOUT_SECONDS" || "$P610_ACTIVE_IDLE_TIMEOUT_SECONDS" == "null" ]]; then
+    P610_ACTIVE_IDLE_TIMEOUT_SECONDS="30"
+fi
+if [[ -z "$P610_GEMINI_PROACTIVE_RECONNECT_SECONDS" || "$P610_GEMINI_PROACTIVE_RECONNECT_SECONDS" == "null" ]]; then
+    P610_GEMINI_PROACTIVE_RECONNECT_SECONDS="120.0"
+fi
 
 export RUNNER_HOST
 export RUNNER_PORT
@@ -42,6 +50,8 @@ export P610_WAKE_THRESHOLD
 export P610_STOP_THRESHOLD
 export P610_REFRACTORY_SECONDS
 export P610_STOP_GUARD_SECONDS
+export P610_ACTIVE_IDLE_TIMEOUT_SECONDS
+export P610_GEMINI_PROACTIVE_RECONNECT_SECONDS
 
 if [[ "$P610_METADATA_STALE" == "true" && -n "${SUPERVISOR_TOKEN:-}" ]]; then
     curl --fail --silent --show-error --max-time 15 \
@@ -57,7 +67,7 @@ if [[ -n "$GEMINI_PROXY_URL" ]]; then
     export http_proxy="$GEMINI_PROXY_URL"
     export https_proxy="$GEMINI_PROXY_URL"
     export all_proxy="$GEMINI_PROXY_URL"
-    export NO_PROXY="127.0.0.1,localhost,supervisor,homeassistant,172.30.32.1,172.30.32.2"
+    export NO_PROXY="127.0.0.1,localhost,supervisor,homeassistant,192.168.0.136,172.30.32.1,172.30.32.2"
     export no_proxy="$NO_PROXY"
 fi
 

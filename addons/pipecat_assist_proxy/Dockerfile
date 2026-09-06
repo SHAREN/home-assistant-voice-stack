@@ -19,10 +19,10 @@ COPY root/patch_gemini_idle_reconnect.py /patch_gemini_idle_reconnect.py
 RUN python3 /patch_webrtc_ice.py && python3 /patch_gemini_idle_reconnect.py && rm -f /patch_webrtc_ice.py /patch_gemini_idle_reconnect.py && chmod a+x /run.sh
 
 LABEL \
-    io.hass.version="0.1.75-proxy26" \
+    io.hass.version="0.1.75-proxy27" \
     io.hass.type="app" \
     org.opencontainers.image.title="Pipecat Assist Proxy" \
-    org.opencontainers.image.source="https://github.com/SHAREN/home-assistant-voice-stack"
+    org.opencontainers.image.source="https://github.com/kyvaith/pipecat-homeassistant"
 
 WORKDIR /
 CMD ["/run.sh"]

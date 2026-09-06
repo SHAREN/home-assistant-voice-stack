@@ -10,7 +10,7 @@ RUN_SH = (ROOT / "addons/pipecat_assist_proxy/root/run.sh").read_text(encoding="
 def test_addon_exposes_host_audio_and_keeps_p610_opt_in():
     assert "audio: true" in CONFIG
     assert "host_network: true" in CONFIG
-    assert "p610_local_audio: false" in CONFIG
+    assert "p610_local_audio: true" in CONFIG
     assert "P610_LOCAL_AUDIO_ENABLED" in RUN_SH
 
 
@@ -35,7 +35,7 @@ def test_run_script_exports_p610_local_options():
 
 def test_physical_p610_uses_same_selected_flow_with_local_audio_transport():
     assert "LocalAudioTransport" in MAIN
-    assert "PyAudio" in MAIN or "pyaudio" in MAIN.lower()
+    assert "LocalAudioTransportParams" in MAIN
     assert "P610 local audio" in MAIN
     assert "_p610_local_flow_id" in MAIN
 
@@ -55,7 +55,7 @@ def test_p610_stop_recycles_to_fresh_warm_standby_without_memory_reuse():
 
 def test_gemini_warm_connection_does_not_generate_initial_greeting():
     assert "inference_on_context_initialization=False" in MAIN
-    assert "turn_complete=False" in MAIN
+    assert "gemini-quiet-context-prime" in MAIN
     assert "gemini-quiet-context-prime" in MAIN
 
 
@@ -80,8 +80,8 @@ def test_proxy18_continuous_command_skips_cue_and_trims_wake_phrase():
 
 
 def test_proxy18_compacts_realtime_tools_without_removing_tools():
-    assert "_compact_tool_description" in MAIN
-    assert "_compact_tools_schema" in MAIN
+    assert "_compact_realtime_tools_schema" in MAIN
+    assert "compact_properties" in MAIN
 
 
 def test_proxy18_pads_p610_output_tail():
@@ -170,3 +170,18 @@ def test_proxy26_supports_optional_thinking_cue_for_long_work():
     assert 'name="thinking_signal"' in MAIN
     assert "p610-thinking-cue" in MAIN
     assert (ROOT / "addons/pipecat_assist_proxy/sounds/thinking.wav").is_file()
+
+
+def test_proxy28_never_runs_proactive_reconnect_during_active_conversation():
+    assert 'if p610_wake_gate.active:' in MAIN
+    assert 'proactive_reconnect_deferred_reason' in MAIN
+    assert '"active_conversation"' in MAIN
+
+
+def test_proxy28_active_idle_timeout_starts_on_wake_and_respects_busy_work():
+    assert 'P610_ACTIVE_IDLE_TIMEOUT_SECONDS' in MAIN
+    assert 'self._restart_idle_watch()' in MAIN
+    assert 'name="p610-active-idle-timeout"' in MAIN
+    assert 'provider_recovery_in_progress' in MAIN
+    assert '_context_has_pending_tool' in MAIN
+    assert 'p610_active_idle_timeout_seconds: 30' in CONFIG

@@ -254,6 +254,11 @@ class P610WakeGate:
         self.activation_buffer_max_seconds = _p610_env_float(
             "P610_ACTIVATION_BUFFER_MAX_SECONDS", 30.0, 2.0, 60.0
         )
+        self.active_idle_timeout_seconds = _p610_env_float(
+            "P610_ACTIVE_IDLE_TIMEOUT_SECONDS", 30.0, 10.0, 120.0
+        )
+        self._last_active_activity_monotonic = 0.0
+        self.activity_busy_callback = None
         self._pre_roll_frames = deque()
         self._pre_roll_duration = 0.0
         self._pending_frames = deque()
@@ -281,6 +286,10 @@ class P610WakeGate:
                 "cue_decision_seconds": self.cue_decision_seconds,
                 "continuation_rms_threshold": self.continuation_rms_threshold,
                 "activation_buffer_max_seconds": self.activation_buffer_max_seconds,
+                "active_idle_timeout_seconds": self.active_idle_timeout_seconds,
+                "idle_timeout_count": int(P610_LOCAL_AUDIO_STATE.get("idle_timeout_count") or 0),
+                "last_active_activity_at": None,
+                "provider_recovery_in_progress": False,
                 "buffered_input_frames": 0,
                 "buffered_input_bytes": 0,
                 "wake_count": 0,
@@ -312,6 +321,19 @@ class P610WakeGate:
                 "provider_recovery_count": 0,
                 "provider_force_reconnect_count": 0,
                 "last_provider_recovery_at": None,
+                "proactive_reconnect_seconds": _p610_env_float(
+                    "P610_GEMINI_PROACTIVE_RECONNECT_SECONDS", 120.0, 0.0, 600.0
+                ),
+                "proactive_reconnect_in_progress": False,
+                "proactive_reconnect_count": int(
+                    P610_LOCAL_AUDIO_STATE.get("proactive_reconnect_count") or 0
+                ),
+                "last_proactive_reconnect_at": P610_LOCAL_AUDIO_STATE.get(
+                    "last_proactive_reconnect_at"
+                ),
+                "last_proactive_reconnect_duration_ms": P610_LOCAL_AUDIO_STATE.get(
+                    "last_proactive_reconnect_duration_ms"
+                ),
             }
         )
 
@@ -469,6 +491,18 @@ class P610WakeGate:
         )
         P610_LOCAL_AUDIO_STATE["buffered_input_seconds"] = round(self._pending_duration, 3)
 
+    def note_active_activity(self, reason: str) -> None:
+        if not self.active:
+            return
+        self._last_active_activity_monotonic = time.monotonic()
+        P610_LOCAL_AUDIO_STATE["last_active_activity_at"] = time.time()
+        P610_LOCAL_AUDIO_STATE["last_active_activity_reason"] = reason
+
+    def active_idle_elapsed(self) -> float:
+        if not self.active or not self._last_active_activity_monotonic:
+            return 0.0
+        return max(0.0, time.monotonic() - self._last_active_activity_monotonic)
+
     def process_audio(self, audio: bytes) -> str | None:
         """Return 'wake' or 'stop' on a local detection, otherwise None."""
         for features in self._features.process_streaming(audio):
@@ -496,6 +530,7 @@ class P610WakeGate:
                     continue
                 self._last_wake_monotonic = now
                 self.active = True
+                self.note_active_activity("wake")
                 P610_LOCAL_AUDIO_STATE["conversation_active"] = True
                 P610_LOCAL_AUDIO_STATE["wake_count"] = int(P610_LOCAL_AUDIO_STATE.get("wake_count") or 0) + 1
                 P610_LOCAL_AUDIO_STATE["last_wake_at"] = time.time()
@@ -519,6 +554,7 @@ class P610WakeInputGateProcessor(FrameProcessor):
         self._gate = gate
         self._audio_debug = audio_debug
         self._provider_recovery_task: asyncio.Task | None = None
+        self._idle_watch_task: asyncio.Task | None = None
         self._session_started_at = P610_LOCAL_AUDIO_STATE.get("started_at")
 
     def _same_p610_session(self) -> bool:
@@ -533,6 +569,7 @@ class P610WakeInputGateProcessor(FrameProcessor):
         P610_LOCAL_AUDIO_STATE["last_provider_recovery_at"] = time.time()
         P610_LOCAL_AUDIO_STATE["last_provider_recovery_reason"] = reason
         P610_LOCAL_AUDIO_STATE["last_provider_error"] = ""
+        P610_LOCAL_AUDIO_STATE["provider_recovery_in_progress"] = False
         if self._audio_debug and self._audio_debug.capture_started:
             self._audio_debug.record_event("provider_recovered", {"reason": reason})
 
@@ -554,6 +591,7 @@ class P610WakeInputGateProcessor(FrameProcessor):
         ) + 1
         P610_LOCAL_AUDIO_STATE["provider_recovery_started_at"] = time.time()
         P610_LOCAL_AUDIO_STATE["provider_recovery_reason"] = reason
+        P610_LOCAL_AUDIO_STATE["provider_recovery_in_progress"] = True
         P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
         P610_LOCAL_AUDIO_STATE["standby_state"] = "recovering"
         if self._audio_debug and self._audio_debug.capture_started:
@@ -605,6 +643,55 @@ class P610WakeInputGateProcessor(FrameProcessor):
         logger.error("P610 Gemini readiness recovery failed; recycling only the P610 worker")
         if self._gate.recycle_callback:
             self._gate.recycle_callback()
+        P610_LOCAL_AUDIO_STATE["provider_recovery_in_progress"] = False
+
+    async def _watch_active_idle_timeout(self) -> None:
+        try:
+            while self._gate.active and self._same_p610_session():
+                await asyncio.sleep(0.5)
+                if not self._gate.active or not self._same_p610_session():
+                    return
+                busy = bool(
+                    self._gate.cue_playing
+                    or P610_LOCAL_AUDIO_STATE.get("model_end_pending")
+                    or P610_LOCAL_AUDIO_STATE.get("provider_recovery_in_progress")
+                    or P610_LOCAL_AUDIO_STATE.get("proactive_reconnect_in_progress")
+                    or (self._gate.activity_busy_callback and self._gate.activity_busy_callback())
+                )
+                if busy:
+                    self._gate.note_active_activity("busy")
+                    continue
+                elapsed = self._gate.active_idle_elapsed()
+                if elapsed < self._gate.active_idle_timeout_seconds:
+                    continue
+                self._gate.active = False
+                self._gate.end_cue_requested = True
+                self._gate.clear_activation_buffer()
+                P610_LOCAL_AUDIO_STATE["conversation_active"] = False
+                P610_LOCAL_AUDIO_STATE["idle_timeout_count"] = int(
+                    P610_LOCAL_AUDIO_STATE.get("idle_timeout_count") or 0
+                ) + 1
+                P610_LOCAL_AUDIO_STATE["last_idle_timeout_at"] = time.time()
+                P610_LOCAL_AUDIO_STATE["last_idle_timeout_elapsed_seconds"] = round(elapsed, 2)
+                if self._audio_debug and self._audio_debug.capture_started:
+                    self._audio_debug.record_event("active_idle_timeout", {
+                        "elapsed_seconds": round(elapsed, 2),
+                        "timeout_seconds": self._gate.active_idle_timeout_seconds,
+                    })
+                logger.info("P610 active listening idle for {:.1f}s; recycling to warm standby", elapsed)
+                await self.push_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+                if self._gate.recycle_callback:
+                    self._gate.recycle_callback()
+                return
+        except asyncio.CancelledError:
+            return
+
+    def _restart_idle_watch(self) -> None:
+        if self._idle_watch_task and not self._idle_watch_task.done():
+            self._idle_watch_task.cancel()
+        self._idle_watch_task = asyncio.create_task(
+            self._watch_active_idle_timeout(), name="p610-active-idle-timeout"
+        )
 
     async def _play_wake_cue(self) -> None:
         try:
@@ -689,6 +776,7 @@ class P610WakeInputGateProcessor(FrameProcessor):
             if not provider_ready_at_wake:
                 logger.warning("P610 woke while Gemini realtime input was not ready; starting local recovery")
                 self._ensure_provider_recovery("wake_provider_not_ready")
+            self._restart_idle_watch()
             asyncio.create_task(self._decide_wake_cue(), name="p610-wake-cue-decision")
             return
         if event == "stop":
@@ -701,6 +789,9 @@ class P610WakeInputGateProcessor(FrameProcessor):
             return
         if not self._gate.active:
             return
+
+        if self._gate._normalized_rms(frame) >= self._gate.continuation_rms_threshold:
+            self._gate.note_active_activity("user_audio")
 
         if self._gate.cue_decision_pending:
             self._gate.buffer_activation_frame(frame)
@@ -808,6 +899,7 @@ class P610WakeOutputGateProcessor(FrameProcessor):
                 logger.warning("P610 assistant PCM gap {:.1f} ms", gap_ms)
         self._last_audio_frame_monotonic = now
         self._response_audio_frames += 1
+        self._gate.note_active_activity("assistant_audio")
 
     def _finish_audio_response_metrics(self, *, interrupted: bool) -> None:
         if self._response_audio_frames:
@@ -6126,6 +6218,17 @@ def _context_message_tool_flags(message: Any) -> tuple[bool, bool]:
     return has_call, has_response
 
 
+def _context_has_pending_tool(messages: list[Any]) -> bool:
+    pending = 0
+    for message in messages[-24:]:
+        has_call, has_response = _context_message_tool_flags(message)
+        if has_call:
+            pending += 1
+        if has_response and pending > 0:
+            pending -= 1
+    return pending > 0
+
+
 def _context_messages(context: Any) -> list[Any]:
     if context is None:
         return []
@@ -6379,6 +6482,8 @@ async def run_bot(
             else (LLMContext(context_messages, tools_schema) if tools_schema else LLMContext(context_messages))
         )
         context_for_memory = context
+        if p610_wake_gate:
+            p610_wake_gate.activity_busy_callback = lambda: _context_has_pending_tool(_context_messages(context))
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
             context,
             realtime_service_mode=True,
@@ -6463,11 +6568,21 @@ async def run_bot(
 
             async def _monitor_p610_provider_readiness() -> None:
                 # Keep public status synchronized with the private Gemini input-ready
-                # latch across every idle WebSocket reconnect. If an idle reconnect
-                # gets stuck while no conversation is active, recycle only this P610
-                # worker before the next wake word can land on a dead standby.
+                # latch across reconnects. As of 2026-09-05, Gemini 3.1 Live Preview
+                # has an upstream regression that hard-aborts some connections around
+                # 151-154 seconds without GoAway. Until Google fixes that regression,
+                # proactively refresh the provider connection before the observed
+                # deadline. This is deliberately a temporary workaround, not a normal
+                # Gemini protocol requirement.
                 session_started_at = P610_LOCAL_AUDIO_STATE.get("started_at")
+                proactive_reconnect_seconds = _p610_env_float(
+                    "P610_GEMINI_PROACTIVE_RECONNECT_SECONDS", 120.0, 0.0, 600.0
+                )
+                P610_LOCAL_AUDIO_STATE["proactive_reconnect_seconds"] = (
+                    proactive_reconnect_seconds
+                )
                 seen_ready = False
+                ready_since: float | None = None
                 not_ready_since: float | None = None
                 warned_stuck = False
                 while (
@@ -6475,10 +6590,14 @@ async def run_bot(
                     and P610_LOCAL_AUDIO_STATE.get("started_at") == session_started_at
                     and not P610_LOCAL_AUDIO_STATE.get("recycle_requested")
                 ):
+                    now = time.monotonic()
                     ready = p610_wake_gate.provider_ready()
                     if ready:
-                        if not_ready_since is not None:
-                            elapsed = time.monotonic() - not_ready_since
+                        recovered_from_reconnect = not_ready_since is not None
+                        if not seen_ready or recovered_from_reconnect:
+                            ready_since = now
+                        if recovered_from_reconnect:
+                            elapsed = now - not_ready_since
                             if elapsed >= 0.5:
                                 logger.info(
                                     "P610 Gemini realtime readiness recovered after {:.2f}s", elapsed
@@ -6493,6 +6612,80 @@ async def run_bot(
                         P610_LOCAL_AUDIO_STATE["provider_healthy"] = True
                         if not p610_wake_gate.active:
                             P610_LOCAL_AUDIO_STATE["standby_state"] = "ready"
+
+                        connection_age = (now - ready_since) if ready_since is not None else 0.0
+                        proactive_due = bool(
+                            proactive_reconnect_seconds > 0
+                            and ready_since is not None
+                            and connection_age >= proactive_reconnect_seconds
+                        )
+                        if proactive_due:
+                            # Never deliberately reconnect Gemini during an active P610
+                            # conversation. The previous proxy27 workaround did this and
+                            # could interrupt/extend a live turn every ~120 seconds. Real
+                            # provider loss is still handled by active-turn recovery.
+                            if p610_wake_gate.active:
+                                P610_LOCAL_AUDIO_STATE["proactive_reconnect_deferred_at"] = time.time()
+                                P610_LOCAL_AUDIO_STATE["proactive_reconnect_deferred_reason"] = "active_conversation"
+                            elif P610_LOCAL_AUDIO_STATE.get("pcm_output_running") is True:
+                                P610_LOCAL_AUDIO_STATE["proactive_reconnect_deferred_at"] = time.time()
+                                P610_LOCAL_AUDIO_STATE["proactive_reconnect_deferred_reason"] = "assistant_audio"
+                            else:
+                                reconnect_started = time.monotonic()
+                                P610_LOCAL_AUDIO_STATE["proactive_reconnect_in_progress"] = True
+                                P610_LOCAL_AUDIO_STATE["last_proactive_reconnect_requested_at"] = time.time()
+                                if not p610_wake_gate.active:
+                                    P610_LOCAL_AUDIO_STATE["standby_state"] = "reconnecting"
+                                logger.info(
+                                    "P610 proactively refreshing Gemini Live connection after {:.1f}s "
+                                    "to avoid the current 151-154s upstream hard-abort regression",
+                                    connection_age,
+                                )
+                                try:
+                                    await llm._reconnect()
+                                    reconnect_elapsed = time.monotonic() - reconnect_started
+                                    reconnected = bool(
+                                        getattr(llm, "_ready_for_realtime_input", False)
+                                    )
+                                    P610_LOCAL_AUDIO_STATE["proactive_reconnect_count"] = int(
+                                        P610_LOCAL_AUDIO_STATE.get("proactive_reconnect_count") or 0
+                                    ) + 1
+                                    P610_LOCAL_AUDIO_STATE["last_proactive_reconnect_at"] = time.time()
+                                    P610_LOCAL_AUDIO_STATE["last_proactive_reconnect_duration_ms"] = round(
+                                        reconnect_elapsed * 1000, 1
+                                    )
+                                    if reconnected:
+                                        ready_since = time.monotonic()
+                                        P610_LOCAL_AUDIO_STATE["provider_healthy"] = True
+                                        P610_LOCAL_AUDIO_STATE["provider_input_ready"] = True
+                                        if not p610_wake_gate.active:
+                                            P610_LOCAL_AUDIO_STATE["standby_state"] = "ready"
+                                        logger.info(
+                                            "P610 proactive Gemini Live refresh completed in {:.2f}s",
+                                            reconnect_elapsed,
+                                        )
+                                    else:
+                                        not_ready_since = time.monotonic()
+                                        P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                                        P610_LOCAL_AUDIO_STATE["provider_input_ready"] = False
+                                        logger.warning(
+                                            "P610 proactive Gemini Live refresh returned before realtime input was ready"
+                                        )
+                                except Exception as err:
+                                    not_ready_since = time.monotonic()
+                                    P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                                    P610_LOCAL_AUDIO_STATE["provider_input_ready"] = False
+                                    P610_LOCAL_AUDIO_STATE["last_provider_error"] = (
+                                        f"proactive Gemini Live reconnect failed: {err}"[:1000]
+                                    )
+                                    P610_LOCAL_AUDIO_STATE["last_provider_error_at"] = time.time()
+                                    logger.exception(
+                                        "P610 proactive Gemini Live refresh failed; normal recovery will continue"
+                                    )
+                                finally:
+                                    P610_LOCAL_AUDIO_STATE["proactive_reconnect_in_progress"] = False
+                                await asyncio.sleep(0.10)
+                                continue
                     elif seen_ready:
                         if not_ready_since is None:
                             not_ready_since = time.monotonic()
