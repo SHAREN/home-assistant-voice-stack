@@ -16,6 +16,25 @@ The public add-on intentionally ships without personal network values or proxy e
 | p610_refractory_seconds | 2.0 | Minimum time between wake detections |
 | p610_stop_guard_seconds | 0.5 | Ignore Stop detection briefly after the wake cue |
 
+## Deployed P610 production overrides (2026-09-23)
+
+The table above describes the **public generic add-on defaults**. The calibrated local production deployment currently differs:
+
+| Setting | Production value |
+| --- | --- |
+| Pipecat Assist Proxy | `0.1.75-proxy39` |
+| Gemini model | `gemini-3.8-live` |
+| language | `ru-RU` |
+| `p610_local_audio` | `true` |
+| `p610_wake_threshold` | `0.85` |
+| `p610_stop_threshold` | `0.5` |
+| `interrupt_response` | `true` |
+| active-session idle timeout | `30 s` |
+| control-guard quiet debounce | `0.20 s` |
+| control-guard total deadline | `0.80 s` |
+
+No personal proxy endpoint, API key, Home Assistant token, hostname, or recorded audio belongs in this public repository. See [P610 production state](P610_PRODUCTION_STATE_2026-09-23.md).
+
 ## Gemini Live
 
 Configure the Google Gemini Live provider in the Pipecat Ingress UI rather than putting an API key in source files.
@@ -47,7 +66,7 @@ Important internal defaults:
 | --- | --- | --- |
 | local pre-roll | 2.0 s | Recent mic ring kept locally before wake |
 | command overlap | 0.4 s | Trailing audio retained around wake detection |
-| cue decision | 0.9 s | Window to detect a continuous command before playing the cue |
+| cue handling | production buffers through the cue | User mic frames are retained while the activation cue plays; the old public source snapshot still documents/contains cue-decision logic |
 | activation buffer cap | 30 s | Maximum queued mic audio while the provider is not ready |
 | continuation RMS threshold | 0.012 normalized | Simple post-wake speech/energy continuation check |
 

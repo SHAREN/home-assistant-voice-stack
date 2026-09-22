@@ -20,8 +20,8 @@ hassio_role: manager
 options:
   runner_port: 7861
   log_level: "INFO"
-  gemini_proxy_url: "http://45.87.107.117:39731"
-  p610_local_audio: true
+  gemini_proxy_url: ""
+  p610_local_audio: false
   p610_flow_id: "home-default"
   p610_wake_threshold: 0.6
   p610_stop_threshold: 0.5

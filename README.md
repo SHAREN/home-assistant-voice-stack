@@ -6,6 +6,8 @@ This repository is not a fork of the Pipecat core library. It is a derivative ap
 
 Russian setup guide: [docs/README.ru.md](docs/README.ru.md)
 
+Current deployed P610 baseline and recovery notes: [docs/P610_PRODUCTION_STATE_2026-09-23.md](docs/P610_PRODUCTION_STATE_2026-09-23.md)
+
 ## Highlights
 
 - Gemini Live speech-to-speech with real full-duplex audio and barge-in.
@@ -15,6 +17,9 @@ Russian setup guide: [docs/README.ru.md](docs/README.ru.md)
 - Local Stop command that ends the conversation and immediately warms a fresh standby session.
 - Warm Gemini WebSocket: the provider is connected before wake, while microphone audio remains locally gated.
 - Pre-roll and activation buffering so a continuous phrase such as "Okay Nabu, weather" is not lost while the provider is becoming ready.
+- Current production P610 behavior starts the activation cue immediately while microphone audio continues to be buffered; the buffered command is flushed after the cue instead of being discarded.
+- Current production control guard authorizes mutating Home Assistant actions only from fresh actionable speech, verifies on/off direction, and fails closed quickly when the transcript is stale.
+- Simple successful on/off actions use short local confirmation tones after the real Home Assistant result instead of speculative spoken success acknowledgements.
 - P610-specific fast end-of-speech tuning for short commands.
 - PulseAudio-native playback through pacat with a small jitter buffer.
 - Home Assistant MCP tools using the Supervisor-backed MCP endpoint.
@@ -88,9 +93,9 @@ Then restart Home Assistant and add Pipecat Assist from Settings > Devices & ser
 
 Open the Pipecat Assist Proxy add-on UI and configure Google Gemini Live with a Google AI Studio API key. The current stack is tested with:
 
-    models/gemini-3.1-flash-live-preview
+    gemini-3.8-live
 
-The exact available model name can change over time; use a Gemini Live audio-capable model supported by your account and region.
+The deployed production P610 baseline uses `gemini-3.8-live` as of 2026-09-23. Exact public model names can change over time; use a Gemini Live audio-capable model supported by your account and region.
 
 If direct Gemini API access is not available from your region, set the optional gemini_proxy_url add-on option to your own HTTP proxy in a supported region. The repository intentionally ships with this value empty.
 
@@ -127,8 +132,8 @@ See [docs/INSTALLATION.md](docs/INSTALLATION.md) for the complete setup sequence
 1. The local wake-word model listens while the provider connection is warm.
 2. Okay Nabu activates the conversation.
 3. A short pre-roll tail is retained so a command that starts immediately after the wake phrase is not clipped.
-4. The system waits briefly for a continuous command. If speech continues, the wake cue is skipped so it cannot mask or contaminate the command.
-5. Microphone audio is forwarded to Gemini Live.
+4. The activation cue starts immediately. Microphone audio is still captured into the activation buffer while the cue is playing, including the wake overlap, and is flushed in order after the cue instead of being dropped.
+5. Microphone audio is then forwarded to Gemini Live; the physical P610 echo canceller is expected to suppress most of the local cue in the captured signal.
 6. Gemini can call Home Assistant MCP tools and stream audio back.
 7. Assistant PCM is played with pacat/PulseAudio and a small jitter buffer.
 8. A local Stop detection interrupts output, ends the conversation, and immediately creates a fresh warm standby session.
@@ -139,7 +144,8 @@ Current P610 defaults in this release include approximately:
 
 - 2.0 s local pre-roll ring.
 - 0.4 s command overlap around wake.
-- 0.9 s cue-decision window.
+- Production wake threshold 0.85 for Okay Nabu; the public add-on snapshot keeps a conservative generic default of 0.6.
+- 30 s active-session idle timeout when there is no real user/assistant/tool activity.
 - 350 ms Gemini end-of-speech silence for the P610 path.
 - 180 ms PulseAudio output latency buffer.
 - 200 ms silent output tail to avoid clipping the last phoneme.
@@ -195,6 +201,7 @@ See [docs/UPDATING.md](docs/UPDATING.md).
 - [Configuration](docs/CONFIGURATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Plantronics P610](docs/P610.md)
+- [Current deployed P610 production state](docs/P610_PRODUCTION_STATE_2026-09-23.md)
 - [Debugging and audio capture](docs/DEBUGGING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Updating and rollback](docs/UPDATING.md)

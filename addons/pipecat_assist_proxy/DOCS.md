@@ -14,3 +14,5 @@ Key optional P610 features:
 - pre-roll / activation buffering;
 - pacat/PulseAudio streaming output;
 - 24-hour session audio debugging.
+
+For the current deployed P610 behavior, control-guard rules, success tones, and recovery gap, see [`docs/P610_PRODUCTION_STATE_2026-09-23.md`](../../docs/P610_PRODUCTION_STATE_2026-09-23.md).

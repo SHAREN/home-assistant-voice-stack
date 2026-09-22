@@ -44,15 +44,23 @@ This reduces wake-to-model startup time without continuously streaming room audi
 
 ## Wake flow
 
-1. Local Okay Nabu detection activates the gate.
-2. The gate retains a short overlap from the pre-roll ring.
-3. A cue-decision timer starts.
-4. If the user continues speaking within the decision window, the wake cue is skipped.
-5. If the user pauses, the fixed wake cue is played as audible feedback.
-6. If Gemini is ready, buffered audio is flushed in order.
-7. If Gemini is reconnecting, audio remains queued up to the activation-buffer cap.
+Current production behavior is designed around **never discarding user microphone frames because the device is playing its own cue**:
 
-The design goal is to support a continuous phrase with no artificial pause after the wake word.
+1. Local Okay Nabu detection activates the gate.
+2. The gate retains the pre-roll overlap around the wake event.
+3. The activation cue starts immediately.
+4. Microphone capture continues into the activation buffer while the cue is playing.
+5. If Gemini is ready, buffered audio is flushed in order after the cue; if Gemini is recovering, it remains queued up to the activation-buffer cap.
+6. The physical P610 echo canceller is expected to reduce the cue in the captured microphone signal.
+7. Full-duplex streaming continues, so a continuous phrase does not require an artificial pause after the wake word.
+
+The older public source snapshot still contains cue-decision/skip logic. For the deployed `proxy39` recovery contract, follow [P610 production state](P610_PRODUCTION_STATE_2026-09-23.md).
+
+## Mutating-control guard
+
+The deployed P610 control path treats Gemini realtime tool proposals as provisional until fresh speech authorizes the side effect. A dedicated control guard uses committed and live-unflushed transcription, verifies on/off direction, rejects stale/status/past-tense authorization, and fails closed within roughly 0.8 seconds after a short 0.2-second quiet debounce.
+
+While a mutating Home Assistant call is in flight, assistant PCM that predates the real tool result is suppressed. After a successful simple on/off action, local success tones provide deterministic feedback instead of allowing a speculative spoken success acknowledgement.
 
 ## Turn detection
 
