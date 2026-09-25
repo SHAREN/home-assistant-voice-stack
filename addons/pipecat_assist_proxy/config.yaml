@@ -1,7 +1,7 @@
 name: Pipecat Assist Proxy
-version: "0.1.75-proxy28"
+version: "0.1.75-proxy39"
 slug: pipecat_assist_proxy
-description: Pipecat Assist with Gemini proxy, persistent logs, MCP traces, remote WebRTC ICE/STUN, self-healing P610 standby, and a active-turn-safe Gemini Live reconnect workaround, 30s P610 active-session idle timeout, persistent logs, MCP traces, and remote WebRTC diagnostics.
+description: Pipecat Assist with Gemini proxy, persistent logs, MCP traces, remote WebRTC ICE/STUN, self-healing P610 standby, active-turn-safe Gemini Live reconnect, 30s active-session idle timeout, immediate buffered P610 wake cue, managed Gemini GoAway/session-resumption rotation, Gemini context-window compression, low-latency current-turn-safe P610 control guard, session-end self-wake suppression, and current-turn room/control safety guard.
 url: https://github.com/kyvaith/pipecat-homeassistant
 arch:
   - aarch64
@@ -27,8 +27,10 @@ options:
   p610_stop_threshold: 0.5
   p610_refractory_seconds: 2.0
   p610_stop_guard_seconds: 0.5
-  p610_gemini_proactive_reconnect_seconds: 120.0
+  p610_end_cue_wake_guard_seconds: 1.0
+  p610_gemini_proactive_reconnect_seconds: 0.0
   p610_active_idle_timeout_seconds: 30
+  p610_control_quiet_seconds: 0.2
 schema:
   runner_port: port
   log_level: list(DEBUG|INFO|WARNING|ERROR)
@@ -39,5 +41,7 @@ schema:
   p610_stop_threshold: float
   p610_refractory_seconds: float
   p610_stop_guard_seconds: float
+  p610_end_cue_wake_guard_seconds: float
   p610_gemini_proactive_reconnect_seconds: float
   p610_active_idle_timeout_seconds: int
+  p610_control_quiet_seconds: float

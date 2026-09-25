@@ -11,7 +11,7 @@ MCP_BRIDGE = (ROOT / "addons/pipecat_assist_proxy/app/mcp_bridge.py").read_text(
 def test_addon_exposes_host_audio_and_keeps_p610_opt_in():
     assert "audio: true" in CONFIG
     assert "host_network: true" in CONFIG
-    assert "p610_local_audio: true" in CONFIG
+    assert "p610_local_audio: false" in CONFIG
     assert "P610_LOCAL_AUDIO_ENABLED" in RUN_SH
 
 
