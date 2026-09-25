@@ -11,6 +11,7 @@ P610_WAKE_THRESHOLD="$(bashio::config 'p610_wake_threshold')"
 P610_STOP_THRESHOLD="$(bashio::config 'p610_stop_threshold')"
 P610_REFRACTORY_SECONDS="$(bashio::config 'p610_refractory_seconds')"
 P610_STOP_GUARD_SECONDS="$(bashio::config 'p610_stop_guard_seconds')"
+P610_END_CUE_WAKE_GUARD_SECONDS="$(bashio::config 'p610_end_cue_wake_guard_seconds')"
 P610_ACTIVE_IDLE_TIMEOUT_SECONDS="$(bashio::config 'p610_active_idle_timeout_seconds')"
 P610_GEMINI_PROACTIVE_RECONNECT_SECONDS="$(bashio::config 'p610_gemini_proactive_reconnect_seconds')"
 P610_METADATA_STALE="false"
@@ -33,6 +34,9 @@ fi
 if [[ -z "$P610_STOP_GUARD_SECONDS" || "$P610_STOP_GUARD_SECONDS" == "null" ]]; then
     P610_STOP_GUARD_SECONDS="0.5"
 fi
+if [[ -z "$P610_END_CUE_WAKE_GUARD_SECONDS" || "$P610_END_CUE_WAKE_GUARD_SECONDS" == "null" ]]; then
+    P610_END_CUE_WAKE_GUARD_SECONDS="1.0"
+fi
 if [[ -z "$P610_ACTIVE_IDLE_TIMEOUT_SECONDS" || "$P610_ACTIVE_IDLE_TIMEOUT_SECONDS" == "null" ]]; then
     P610_ACTIVE_IDLE_TIMEOUT_SECONDS="30"
 fi
@@ -50,6 +54,7 @@ export P610_WAKE_THRESHOLD
 export P610_STOP_THRESHOLD
 export P610_REFRACTORY_SECONDS
 export P610_STOP_GUARD_SECONDS
+export P610_END_CUE_WAKE_GUARD_SECONDS
 export P610_ACTIVE_IDLE_TIMEOUT_SECONDS
 export P610_GEMINI_PROACTIVE_RECONNECT_SECONDS
 

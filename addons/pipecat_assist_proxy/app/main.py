@@ -20,7 +20,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
@@ -108,6 +108,7 @@ from app.audio_debug import (
     create_audio_debug_session,
     list_audio_recordings,
 )
+from app.control_guard import VoiceControlGuard
 from app.conversation_log import (
     CONVERSATION_LOGS,
     ConversationSession,
@@ -208,6 +209,8 @@ P610_STOP_MODEL_CONFIG = Path("/app/wakewords/stop.json")
 P610_WAKE_CUE_PATH = Path("/app/sounds/wake_word_triggered.flac")
 P610_END_CUE_PATH = Path("/app/sounds/session_end.wav")
 P610_THINKING_CUE_PATH = Path("/app/sounds/thinking.wav")
+P610_CONTROL_ON_CUE_PATH = Path("/app/sounds/control_on.wav")
+P610_CONTROL_OFF_CUE_PATH = Path("/app/sounds/control_off.wav")
 
 
 def _p610_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -231,12 +234,16 @@ class P610WakeGate:
         self.stop_threshold = _p610_env_float("P610_STOP_THRESHOLD", 0.5, 0.0, 1.0)
         self.refractory_seconds = _p610_env_float("P610_REFRACTORY_SECONDS", 2.0, 0.0, 30.0)
         self.stop_guard_seconds = _p610_env_float("P610_STOP_GUARD_SECONDS", 1.0, 0.0, 5.0)
+        self.end_cue_wake_guard_seconds = _p610_env_float(
+            "P610_END_CUE_WAKE_GUARD_SECONDS", 1.0, 0.0, 5.0
+        )
         self._wake_model.probability_cutoff = self.wake_threshold
         self._stop_model.probability_cutoff = self.stop_threshold
         self._wake_model.debug_probabilities = False
         self._stop_model.debug_probabilities = False
         self.active = False
         self.cue_playing = False
+        self.end_cue_playing = False
         self.end_cue_requested = False
         self.model_end_pending = False
         self.model_end_reason = ""
@@ -257,8 +264,14 @@ class P610WakeGate:
         self.active_idle_timeout_seconds = _p610_env_float(
             "P610_ACTIVE_IDLE_TIMEOUT_SECONDS", 30.0, 10.0, 120.0
         )
+        self.control_quiet_seconds = _p610_env_float(
+            "P610_CONTROL_QUIET_SECONDS", 0.2, 0.10, 5.0
+        )
         self._last_active_activity_monotonic = 0.0
+        self._last_user_audio_monotonic = 0.0
         self.activity_busy_callback = None
+        self.suppress_control_confirmation_audio = False
+        self.control_confirmation_suppress_until_monotonic = 0.0
         self._pre_roll_frames = deque()
         self._pre_roll_duration = 0.0
         self._pending_frames = deque()
@@ -268,6 +281,10 @@ class P610WakeGate:
         self._wake_detected_monotonic = 0.0
         self._last_wake_monotonic = 0.0
         self._stop_guard_until_monotonic = 0.0
+        stored_wake_guard = float(P610_LOCAL_AUDIO_STATE.get("wake_guard_until_monotonic") or 0.0)
+        self._wake_guard_until_monotonic = (
+            stored_wake_guard if stored_wake_guard > time.monotonic() else 0.0
+        )
         if not P610_WAKE_CUE_PATH.is_file():
             raise RuntimeError(f"P610 wake cue not found: {P610_WAKE_CUE_PATH}")
         if not P610_END_CUE_PATH.is_file():
@@ -281,14 +298,24 @@ class P610WakeGate:
                 "stop_threshold": self.stop_threshold,
                 "refractory_seconds": self.refractory_seconds,
                 "stop_guard_seconds": self.stop_guard_seconds,
+                "end_cue_wake_guard_seconds": self.end_cue_wake_guard_seconds,
+                "end_cue_playing": False,
+                "wake_guard_until_monotonic": self._wake_guard_until_monotonic,
+                "wake_guard_blocked_frames": 0,
                 "audio_preroll_seconds": self.pre_roll_seconds,
                 "command_overlap_seconds": self.command_overlap_seconds,
                 "cue_decision_seconds": self.cue_decision_seconds,
                 "continuation_rms_threshold": self.continuation_rms_threshold,
                 "activation_buffer_max_seconds": self.activation_buffer_max_seconds,
                 "active_idle_timeout_seconds": self.active_idle_timeout_seconds,
+                "control_quiet_seconds": self.control_quiet_seconds,
+                "control_confirmation_audio_suppressed": False,
+                "control_tone_count": int(P610_LOCAL_AUDIO_STATE.get("control_tone_count") or 0),
+                "last_control_tone": P610_LOCAL_AUDIO_STATE.get("last_control_tone"),
+                "last_control_tone_at": P610_LOCAL_AUDIO_STATE.get("last_control_tone_at"),
                 "idle_timeout_count": int(P610_LOCAL_AUDIO_STATE.get("idle_timeout_count") or 0),
                 "last_active_activity_at": None,
+                "last_user_audio_at": None,
                 "provider_recovery_in_progress": False,
                 "buffered_input_frames": 0,
                 "buffered_input_bytes": 0,
@@ -320,6 +347,17 @@ class P610WakeGate:
                 "provider_input_ready_checked_at": None,
                 "provider_recovery_count": 0,
                 "provider_force_reconnect_count": 0,
+                "initial_provider_retry_count": int(
+                    P610_LOCAL_AUDIO_STATE.get("initial_provider_retry_count") or 0
+                ),
+                "initial_provider_retry_in_progress": False,
+                "next_initial_provider_retry_at": None,
+                "last_initial_provider_retry_at": P610_LOCAL_AUDIO_STATE.get(
+                    "last_initial_provider_retry_at"
+                ),
+                "last_initial_provider_retry_delay_seconds": P610_LOCAL_AUDIO_STATE.get(
+                    "last_initial_provider_retry_delay_seconds"
+                ),
                 "last_provider_recovery_at": None,
                 "proactive_reconnect_seconds": _p610_env_float(
                     "P610_GEMINI_PROACTIVE_RECONNECT_SECONDS", 120.0, 0.0, 600.0
@@ -361,6 +399,30 @@ class P610WakeGate:
             P610_LOCAL_AUDIO_STATE.get("model_end_count") or 0
         ) + 1
         P610_LOCAL_AUDIO_STATE["last_model_end_at"] = time.time()
+
+    def begin_end_cue_guard(self) -> None:
+        """Keep the speaker's own session-end sound out of wake-word detection."""
+        self.end_cue_playing = True
+        self.clear_activation_buffer()
+        self._features.reset()
+        self._wake_model.reset()
+        self._stop_model.reset()
+        P610_LOCAL_AUDIO_STATE["end_cue_playing"] = True
+        P610_LOCAL_AUDIO_STATE["last_end_cue_guard_started_at"] = time.time()
+
+    def reset_after_end_cue(self) -> None:
+        """Reset acoustic history and gate wake detection through the cue tail."""
+        self._features.reset()
+        self._wake_model.reset()
+        self._stop_model.reset()
+        self.clear_activation_buffer()
+        self.end_cue_playing = False
+        self._wake_guard_until_monotonic = (
+            time.monotonic() + self.end_cue_wake_guard_seconds
+        )
+        P610_LOCAL_AUDIO_STATE["end_cue_playing"] = False
+        P610_LOCAL_AUDIO_STATE["wake_guard_until_monotonic"] = self._wake_guard_until_monotonic
+        P610_LOCAL_AUDIO_STATE["last_end_cue_wake_guard_at"] = time.time()
 
     @staticmethod
     def _frame_duration(frame: InputAudioRawFrame) -> float:
@@ -494,9 +556,16 @@ class P610WakeGate:
     def note_active_activity(self, reason: str) -> None:
         if not self.active:
             return
-        self._last_active_activity_monotonic = time.monotonic()
+        now = time.monotonic()
+        self._last_active_activity_monotonic = now
         P610_LOCAL_AUDIO_STATE["last_active_activity_at"] = time.time()
         P610_LOCAL_AUDIO_STATE["last_active_activity_reason"] = reason
+        if reason == "user_audio":
+            self._last_user_audio_monotonic = now
+            P610_LOCAL_AUDIO_STATE["last_user_audio_at"] = time.time()
+
+    def last_user_audio_monotonic(self) -> float:
+        return self._last_user_audio_monotonic
 
     def active_idle_elapsed(self) -> float:
         if not self.active or not self._last_active_activity_monotonic:
@@ -505,6 +574,14 @@ class P610WakeGate:
 
     def process_audio(self, audio: bytes) -> str | None:
         """Return 'wake' or 'stop' on a local detection, otherwise None."""
+        if not self.active and (
+            self.end_cue_playing or time.monotonic() < self._wake_guard_until_monotonic
+        ):
+            P610_LOCAL_AUDIO_STATE["wake_guard_blocked_frames"] = int(
+                P610_LOCAL_AUDIO_STATE.get("wake_guard_blocked_frames") or 0
+            ) + 1
+            return None
+
         for features in self._features.process_streaming(audio):
             if self.active:
                 # Never feed the speaker's own wake cue into the Stop model.
@@ -545,6 +622,136 @@ class P610WakeGate:
         self._stop_guard_until_monotonic = time.monotonic() + self.stop_guard_seconds
         P610_LOCAL_AUDIO_STATE["stop_guard_until_monotonic"] = self._stop_guard_until_monotonic
 
+
+
+
+async def _trigger_gemini_route_race(reason: str, *, timeout: float = 5.0) -> bool:
+    """Ask the VPS Gemini selector to run one full route race on demand.
+
+    Normal Gemini traffic never triggers probes. Nabu explicitly asks for a
+    race on wake and after a 500 ms provider-readiness miss.
+    """
+    proxy_url = os.getenv("GEMINI_PROXY_URL", "").strip()
+    if not proxy_url:
+        return False
+    try:
+        parts = urlsplit(proxy_url)
+        host = parts.hostname
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        if not host or parts.scheme != "http":
+            return False
+
+        started = time.monotonic()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=min(timeout, 2.0),
+        )
+        try:
+            request = (
+                "CONNECT gemini-race.invalid:443 HTTP/1.1\r\n"
+                "Host: gemini-race.invalid:443\r\n"
+                "Proxy-Connection: close\r\n\r\n"
+            )
+            writer.write(request.encode("ascii"))
+            await writer.drain()
+            head = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"),
+                timeout=timeout,
+            )
+            first_line = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
+            ok = " 200 " in first_line
+            P610_LOCAL_AUDIO_STATE["last_route_race_trigger_at"] = time.time()
+            P610_LOCAL_AUDIO_STATE["last_route_race_reason"] = reason
+            P610_LOCAL_AUDIO_STATE["last_route_race_ok"] = ok
+            P610_LOCAL_AUDIO_STATE["last_route_race_duration_ms"] = round(
+                (time.monotonic() - started) * 1000, 1
+            )
+            if ok:
+                logger.info(
+                    "P610 requested on-demand Gemini route race reason={} duration_ms={}",
+                    reason,
+                    P610_LOCAL_AUDIO_STATE["last_route_race_duration_ms"],
+                )
+            else:
+                logger.warning(
+                    "P610 Gemini route-race control returned unexpected status: {}",
+                    first_line,
+                )
+            return ok
+        finally:
+            writer.close()
+            with suppress(Exception):
+                await writer.wait_closed()
+    except Exception as err:
+        P610_LOCAL_AUDIO_STATE["last_route_race_trigger_at"] = time.time()
+        P610_LOCAL_AUDIO_STATE["last_route_race_reason"] = reason
+        P610_LOCAL_AUDIO_STATE["last_route_race_ok"] = False
+        P610_LOCAL_AUDIO_STATE["last_route_race_error"] = str(err)[:500]
+        logger.warning("P610 Gemini route-race request failed reason={}: {}", reason, err)
+        return False
+
+
+
+async def _p610_control_result_feedback(
+    gate: P610WakeGate,
+    tool_name: str,
+    arguments: dict[str, Any],
+    _result: str,
+) -> None:
+    """Play a local success chime only after Home Assistant confirms the action."""
+
+    if not gate.active:
+        return
+    short_name = str(tool_name or "").rsplit("__", 1)[-1]
+    if short_name == "HassTurnOn":
+        cue_path = P610_CONTROL_ON_CUE_PATH
+        cue_kind = "on"
+    elif short_name == "HassTurnOff":
+        cue_path = P610_CONTROL_OFF_CUE_PATH
+        cue_kind = "off"
+    else:
+        return
+    if not cue_path.is_file():
+        logger.warning("P610 control cue missing for {}: {}", cue_kind, cue_path)
+        return
+
+    # Gemini Live may already have speculative acknowledgement audio queued.
+    # Suppress it briefly; the user receives this deterministic local tone instead.
+    gate.suppress_control_confirmation_audio = True
+    gate.control_confirmation_suppress_until_monotonic = time.monotonic() + 1.5
+    P610_LOCAL_AUDIO_STATE["control_confirmation_audio_suppressed"] = True
+    P610_LOCAL_AUDIO_STATE["control_tone_count"] = int(
+        P610_LOCAL_AUDIO_STATE.get("control_tone_count") or 0
+    ) + 1
+    P610_LOCAL_AUDIO_STATE["last_control_tone"] = cue_kind
+    P610_LOCAL_AUDIO_STATE["last_control_tone_at"] = time.time()
+
+    if gate.audio_debug and gate.audio_debug.capture_started:
+        gate.audio_debug.record_event(
+            "control_success_tone",
+            {
+                "kind": cue_kind,
+                "tool": short_name,
+                "area": arguments.get("area"),
+                "name": arguments.get("name"),
+            },
+        )
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "mpv",
+            "--no-config",
+            "--no-video",
+            "--really-quiet",
+            "--audio-display=no",
+            "--volume=45",
+            str(cue_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        asyncio.create_task(process.wait(), name=f"p610-control-{cue_kind}-tone")
+    except Exception as err:
+        logger.warning("P610 control {} tone playback failed: {}", cue_kind, err)
 
 class P610WakeInputGateProcessor(FrameProcessor):
     """Keep P610 microphone local until Okay Nabu activates the conversation."""
@@ -597,19 +804,25 @@ class P610WakeInputGateProcessor(FrameProcessor):
         if self._audio_debug and self._audio_debug.capture_started:
             self._audio_debug.record_event("provider_recovery_started", {"reason": reason})
 
-        # Normal Gemini idle rotation usually reconnects in well under a second.
-        # Preserve the user's activation buffer and give that automatic reconnect
-        # a short chance before forcing anything.
-        auto_deadline = time.monotonic() + 1.5
+        # Give the existing warm Gemini socket only 500 ms to recover. If it is
+        # still unavailable, force a reconnect; the VPS proxy races the known-good
+        # Gemini routes with setup-only probes and uses the first setupComplete.
+        # The user's microphone remains buffered throughout this failover.
+        auto_deadline = time.monotonic() + 0.5
         while self._same_p610_session() and time.monotonic() < auto_deadline:
             if self._gate.provider_ready():
                 self._mark_provider_recovered("automatic_reconnect")
                 return
             await asyncio.sleep(0.05)
 
+        # The warm socket missed the 500 ms target. Only now run the expensive
+        # all-route race, then reconnect this P610 Gemini service through the winner.
+        # The microphone buffer remains intact throughout.
+        if self._same_p610_session():
+            await _trigger_gemini_route_race("provider_not_ready_after_500ms")
+
         # If the private Gemini realtime-ready latch stayed false, force only
-        # this P610 Gemini service to reconnect. The microphone buffer remains
-        # intact and browser/WebRTC workers are untouched.
+        # this P610 Gemini service to reconnect. Browser/WebRTC workers are untouched.
         if self._same_p610_session() and self._gate.provider_recover_callback:
             P610_LOCAL_AUDIO_STATE["provider_force_reconnect_count"] = int(
                 P610_LOCAL_AUDIO_STATE.get("provider_force_reconnect_count") or 0
@@ -722,26 +935,27 @@ class P610WakeInputGateProcessor(FrameProcessor):
             self._gate.cue_playing = False
 
     async def _decide_wake_cue(self) -> None:
-        await asyncio.sleep(self._gate.cue_decision_seconds)
-        if not self._gate.active or self._gate.continuation_detected:
+        """Play activation feedback immediately while microphone audio is buffered.
+
+        The P610 speakerphone performs hardware acoustic echo cancellation. We
+        still hold microphone frames locally until the cue is finished, so its
+        residual echo is never streamed live to Gemini. Speech that overlaps
+        the cue remains in the activation buffer and is flushed afterwards.
+        """
+        if not self._gate.active:
+            self._gate.cue_playing = False
             self._gate.cue_decision_pending = False
-            if self._audio_debug and self._audio_debug.capture_started:
-                self._audio_debug.record_event("wake_cue_skipped", {"reason": "continuous_command"})
             return
-        # Wake-only mode: user paused, so audible feedback is useful. Drop the
-        # pre-cue wake tail; after the cue the next spoken command starts clean.
         self._gate.cue_decision_pending = False
-        self._gate._pending_frames.clear()
-        self._gate._pending_duration = 0.0
-        self._gate._update_buffer_metrics()
-        self._gate.cue_playing = True
         if self._audio_debug and self._audio_debug.capture_started:
-            self._audio_debug.record_event("wake_cue_started", {})
+            self._audio_debug.record_event("wake_cue_started", {"mode": "immediate_buffered"})
         await self._play_wake_cue()
         if self._audio_debug and self._audio_debug.capture_started:
             self._audio_debug.record_event("wake_cue_finished", {
                 "ok": P610_LOCAL_AUDIO_STATE.get("last_wake_cue_ok"),
                 "return_code": P610_LOCAL_AUDIO_STATE.get("last_wake_cue_return_code"),
+                "buffered_frames": len(self._gate._pending_frames),
+                "buffered_seconds": round(self._gate._pending_duration, 3),
             })
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -771,13 +985,23 @@ class P610WakeInputGateProcessor(FrameProcessor):
                 for debug_frame in self._gate._pending_frames:
                     self._audio_debug.record_raw_mic(debug_frame, sequential=True)
             logger.info(
-                "P610 local wake word detected: Okay Nabu; waiting briefly for continuous command"
+                "P610 local wake word detected: Okay Nabu; playing activation cue immediately"
+            )
+            # Full VPN route race is wake-triggered but never blocks the cue or mic.
+            # The winner is used by the next Gemini connection/reconnect.
+            asyncio.create_task(
+                _trigger_gemini_route_race("okay_nabu"),
+                name="p610-gemini-route-race",
             )
             if not provider_ready_at_wake:
                 logger.warning("P610 woke while Gemini realtime input was not ready; starting local recovery")
                 self._ensure_provider_recovery("wake_provider_not_ready")
             self._restart_idle_watch()
-            asyncio.create_task(self._decide_wake_cue(), name="p610-wake-cue-decision")
+            # Mark cue playback before scheduling the task so the very next mic
+            # frame is buffered instead of racing through to Gemini.
+            self._gate.cue_decision_pending = False
+            self._gate.cue_playing = True
+            asyncio.create_task(self._decide_wake_cue(), name="p610-wake-cue-immediate")
             return
         if event == "stop":
             if self._audio_debug and self._audio_debug.capture_started:
@@ -799,8 +1023,11 @@ class P610WakeInputGateProcessor(FrameProcessor):
                 return
 
         if self._gate.cue_playing:
-            # In wake-only mode the user is expected to wait for the cue; never
-            # forward the speaker's own cue echo into Gemini.
+            # Keep listening while the activation cue is audible. P610 hardware
+            # AEC suppresses most speaker leakage; defer transmission until the
+            # cue ends so speech over the cue is preserved.
+            if not self._gate._pending_frames or self._gate._pending_frames[-1] is not frame:
+                self._gate.buffer_activation_frame(frame)
             return
 
         provider_ready_now = self._gate.provider_ready()
@@ -858,10 +1085,16 @@ def _attach_p610_pipeline_recovery(worker: PipelineWorker, gate: P610WakeGate | 
 class P610WakeOutputGateProcessor(FrameProcessor):
     """Play Gemini PCM through PulseAudio and enforce P610 session gating."""
 
-    def __init__(self, gate: P610WakeGate, audio_debug=None) -> None:
+    def __init__(
+        self,
+        gate: P610WakeGate,
+        audio_debug=None,
+        mutating_tool_pending: Callable[[], bool] | None = None,
+    ) -> None:
         super().__init__()
         self._gate = gate
         self._audio_debug = audio_debug
+        self._mutating_tool_pending = mutating_tool_pending
         self._pcm_output: asyncio.subprocess.Process | None = None
         self._pcm_output_sample_rate = 0
         self._last_audio_frame_monotonic = 0.0
@@ -975,6 +1208,7 @@ class P610WakeOutputGateProcessor(FrameProcessor):
             P610_LOCAL_AUDIO_STATE["last_pcm_output_stopped_at"] = time.time()
 
     async def _play_end_cue(self) -> None:
+        self._gate.begin_end_cue_guard()
         try:
             process = await asyncio.create_subprocess_exec(
                 "mpv",
@@ -994,6 +1228,8 @@ class P610WakeOutputGateProcessor(FrameProcessor):
             P610_LOCAL_AUDIO_STATE["last_end_cue_ok"] = False
             P610_LOCAL_AUDIO_STATE["last_end_cue_error"] = str(err)
             logger.exception("P610 end cue playback failed: {}", err)
+        finally:
+            self._gate.reset_after_end_cue()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -1007,6 +1243,46 @@ class P610WakeOutputGateProcessor(FrameProcessor):
             ) + len(frame.audio)
             P610_LOCAL_AUDIO_STATE["last_assistant_audio_at"] = time.time()
             if not self._gate.active:
+                return
+
+            # Never let Gemini audibly claim a Home Assistant side effect succeeded
+            # while that action is still waiting on the deterministic guard or the
+            # real MCP result. Gemini Live may continue streaming optimistic audio
+            # after it emits a function call. Drop those pre-result PCM frames; once
+            # the function result is delivered, the model can speak the grounded
+            # confirmation normally.
+            control_confirmation_suppressed = bool(
+                self._gate.suppress_control_confirmation_audio
+                and time.monotonic() <= self._gate.control_confirmation_suppress_until_monotonic
+            )
+            if self._gate.suppress_control_confirmation_audio and not control_confirmation_suppressed:
+                self._gate.suppress_control_confirmation_audio = False
+                P610_LOCAL_AUDIO_STATE["control_confirmation_audio_suppressed"] = False
+
+            tool_pending = False
+            if self._mutating_tool_pending is not None:
+                with suppress(Exception):
+                    tool_pending = bool(self._mutating_tool_pending())
+            if control_confirmation_suppressed:
+                P610_LOCAL_AUDIO_STATE["control_confirmation_audio_suppressed"] = True
+                P610_LOCAL_AUDIO_STATE["control_confirmation_audio_suppressed_frames"] = int(
+                    P610_LOCAL_AUDIO_STATE.get("control_confirmation_audio_suppressed_frames") or 0
+                ) + 1
+                if self._audio_debug and self._audio_debug.capture_started:
+                    self._audio_debug.record_event("control_confirmation_audio_suppressed", {})
+                if self._pcm_output is not None:
+                    await self._stop_pcm_output(interrupted=True)
+                return
+
+            if tool_pending:
+                P610_LOCAL_AUDIO_STATE["mutating_tool_audio_suppressed_frames"] = int(
+                    P610_LOCAL_AUDIO_STATE.get("mutating_tool_audio_suppressed_frames") or 0
+                ) + 1
+                P610_LOCAL_AUDIO_STATE["last_mutating_tool_audio_suppressed_at"] = time.time()
+                if self._audio_debug and self._audio_debug.capture_started:
+                    self._audio_debug.record_event("mutating_tool_audio_suppressed", {})
+                if self._pcm_output is not None:
+                    await self._stop_pcm_output(interrupted=True)
                 return
             try:
                 self._note_audio_frame(frame)
@@ -1036,6 +1312,10 @@ class P610WakeOutputGateProcessor(FrameProcessor):
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, TTSStoppedFrame):
             await self._stop_pcm_output(interrupted=False)
             self._finish_audio_response_metrics(interrupted=False)
+            if self._gate.suppress_control_confirmation_audio:
+                self._gate.suppress_control_confirmation_audio = False
+                self._gate.control_confirmation_suppress_until_monotonic = 0.0
+                P610_LOCAL_AUDIO_STATE["control_confirmation_audio_suppressed"] = False
             if self._audio_debug and self._audio_debug.capture_started:
                 self._audio_debug.record_event("tts_stopped", {
                     "max_gap_ms": P610_LOCAL_AUDIO_STATE.get("last_response_max_gap_ms"),
@@ -1061,6 +1341,10 @@ class P610WakeOutputGateProcessor(FrameProcessor):
         if direction == FrameDirection.DOWNSTREAM and isinstance(frame, InterruptionFrame):
             await self._stop_pcm_output(interrupted=True)
             self._finish_audio_response_metrics(interrupted=True)
+            if self._gate.suppress_control_confirmation_audio:
+                self._gate.suppress_control_confirmation_audio = False
+                self._gate.control_confirmation_suppress_until_monotonic = 0.0
+                P610_LOCAL_AUDIO_STATE["control_confirmation_audio_suppressed"] = False
             play_end_cue = self._gate.end_cue_requested
             if not play_end_cue:
                 if self._audio_debug and self._audio_debug.capture_started:
@@ -4382,6 +4666,19 @@ async def _handle_gemini_live_message(
     if message.get("error"):
         raise RuntimeError(_gemini_live_error_message(message))
 
+    # Gemini can deliver a tool call before (or in the same message as) the
+    # final input transcription. Record input text first so the structural
+    # control guard can validate intent/room before any HA side effect.
+    server_content = message.get("serverContent")
+    if isinstance(server_content, dict):
+        input_transcription = server_content.get("inputTranscription")
+        if isinstance(input_transcription, dict):
+            text = str(input_transcription.get("text") or "")
+            if text:
+                turn.transcript = _append_gemini_live_text(turn.transcript, text)
+                if websocket:
+                    await _send_ws_json(websocket, {"type": "partial", "text": turn.transcript.strip()})
+
     tool_call = message.get("toolCall")
     if isinstance(tool_call, dict):
         function_calls = tool_call.get("functionCalls") or []
@@ -4398,17 +4695,8 @@ async def _handle_gemini_live_message(
         if responses:
             await provider_ws.send(json.dumps({"toolResponse": {"functionResponses": responses}}))
 
-    server_content = message.get("serverContent")
     if not isinstance(server_content, dict):
         return ""
-
-    input_transcription = server_content.get("inputTranscription")
-    if isinstance(input_transcription, dict):
-        text = str(input_transcription.get("text") or "")
-        if text:
-            turn.transcript = _append_gemini_live_text(turn.transcript, text)
-            if websocket:
-                await _send_ws_json(websocket, {"type": "partial", "text": turn.transcript.strip()})
 
     output_transcription = server_content.get("outputTranscription")
     if isinstance(output_transcription, dict):
@@ -4489,6 +4777,13 @@ async def _run_gemini_live_ha_turn(
             bridge = CombinedMCPBridge(mcp_servers, flow.mcp_tool_allowlist)
             try:
                 await bridge.start()
+                bridge.set_tool_guard(
+                    VoiceControlGuard(
+                        lambda: turn.transcript,
+                        source="browser-direct",
+                        settle_seconds=0.30,
+                    )
+                )
                 mcp_tools_schema = await bridge.tools_schema(
                     cache_enabled=config.mcp_tools_cache_enabled,
                     cache_ttl_seconds=config.mcp_tools_cache_ttl_seconds,
@@ -5764,6 +6059,12 @@ def _gemini_live_service(
     if flow.max_output_tokens:
         settings_kwargs["max_tokens"] = flow.max_output_tokens
 
+    # Keep long Gemini Live conversations alive beyond the normal audio-only
+    # context horizon. Pipecat maps this to Google's sliding-window
+    # contextWindowCompression. Omitting trigger_tokens intentionally uses
+    # Google's default threshold instead of forcing an aggressive local value.
+    settings_kwargs["context_window_compression"] = {"enabled": True}
+
     from google.genai import types as genai_types
 
     proxy_url = os.getenv("GEMINI_PROXY_URL", "").strip()
@@ -6240,6 +6541,35 @@ def _context_messages(context: Any) -> list[Any]:
     return []
 
 
+def _latest_context_user_text(context: Any) -> str:
+    for message in reversed(_context_messages(context)):
+        if _context_message_role(message) != "user":
+            continue
+        text = _context_message_text(message)
+        _, is_tool_response = _context_message_tool_flags(message)
+        if text and not is_tool_response:
+            return text
+    return ""
+
+
+
+
+def _latest_realtime_control_text(context: Any, llm: Any) -> str:
+    """Prefer Gemini's live transcription buffer before final context flush.
+
+    Gemini Live can emit a function call several seconds before Pipecat commits
+    the final input transcription into LLMContext. The service's private
+    user-transcription buffer already contains the current unflushed text, so
+    use it when present; otherwise fall back to the last finalized user turn.
+    """
+
+    with suppress(Exception):
+        partial = str(getattr(llm, "_user_transcription_buffer", "") or "").strip()
+        if partial:
+            return partial
+    return _latest_context_user_text(context)
+
+
 def _context_progress_fingerprint(messages: list[Any]) -> str:
     compact: list[tuple[str, str, bool, bool]] = []
     for message in messages[-16:]:
@@ -6365,6 +6695,12 @@ async def run_bot(
                 cache_ttl_seconds=config.mcp_tools_cache_ttl_seconds,
                 conversation_session_id=conversation_session.id if conversation_session else "",
             )
+            if p610_wake_gate:
+                bridge.set_control_result_callback(
+                    lambda name, args, result: _p610_control_result_feedback(
+                        p610_wake_gate, name, args, result
+                    )
+                )
             if not mcp_tools_schema.standard_tools:
                 mcp_tools_schema = None
         except asyncio.CancelledError as err:
@@ -6482,6 +6818,20 @@ async def run_bot(
             else (LLMContext(context_messages, tools_schema) if tools_schema else LLMContext(context_messages))
         )
         context_for_memory = context
+        if bridge:
+            bridge.set_tool_guard(
+                VoiceControlGuard(
+                    (
+                        (lambda: _latest_realtime_control_text(context, llm))
+                        if p610_wake_gate
+                        else (lambda: _latest_context_user_text(context))
+                    ),
+                    source="p610" if p610_wake_gate else "browser",
+                    settle_seconds=0.80 if p610_wake_gate else 0.30,
+                    activity_getter=(p610_wake_gate.last_user_audio_monotonic if p610_wake_gate else None),
+                    quiet_seconds=(p610_wake_gate.control_quiet_seconds if p610_wake_gate else 0.0),
+                )
+            )
         if p610_wake_gate:
             p610_wake_gate.activity_busy_callback = lambda: _context_has_pending_tool(_context_messages(context))
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -6512,7 +6862,11 @@ async def run_bot(
         if audio_debug:
             processors.append(audio_debug.output_recorder)
         if p610_wake_gate:
-            processors.append(P610WakeOutputGateProcessor(p610_wake_gate, audio_debug))
+            processors.append(P610WakeOutputGateProcessor(
+                p610_wake_gate,
+                audio_debug,
+                bridge.mutating_tool_pending if bridge else None,
+            ))
         processors.extend([transport.output(), assistant_aggregator])
 
         pipeline = Pipeline(processors)
@@ -6585,6 +6939,9 @@ async def run_bot(
                 ready_since: float | None = None
                 not_ready_since: float | None = None
                 warned_stuck = False
+                initial_not_ready_since = time.monotonic()
+                initial_retry_attempt = 0
+                next_initial_retry_at = initial_not_ready_since + 25.0
                 while (
                     P610_LOCAL_AUDIO_STATE.get("running") is True
                     and P610_LOCAL_AUDIO_STATE.get("started_at") == session_started_at
@@ -6686,6 +7043,120 @@ async def run_bot(
                                     P610_LOCAL_AUDIO_STATE["proactive_reconnect_in_progress"] = False
                                 await asyncio.sleep(0.10)
                                 continue
+                    elif not seen_ready:
+                        # A failed first Gemini setup used to strand Nabu forever:
+                        # the monitor only handled a provider that had been ready at least once.
+                        # After the normal 20 s startup grace, periodically retry only this
+                        # Gemini service. Back off to avoid hammering quota/network failures.
+                        initial_elapsed = now - initial_not_ready_since
+                        if initial_elapsed >= 20.0:
+                            P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                            if not p610_wake_gate.active:
+                                P610_LOCAL_AUDIO_STATE["standby_state"] = "degraded"
+
+                        retry_blocked = bool(
+                            p610_wake_gate.active
+                            or P610_LOCAL_AUDIO_STATE.get("pcm_output_running") is True
+                        )
+                        if now >= next_initial_retry_at and not retry_blocked:
+                            initial_retry_attempt += 1
+                            retry_started = time.monotonic()
+                            P610_LOCAL_AUDIO_STATE["initial_provider_retry_count"] = int(
+                                P610_LOCAL_AUDIO_STATE.get("initial_provider_retry_count") or 0
+                            ) + 1
+                            P610_LOCAL_AUDIO_STATE["initial_provider_retry_in_progress"] = True
+                            P610_LOCAL_AUDIO_STATE["provider_recovery_in_progress"] = True
+                            P610_LOCAL_AUDIO_STATE["provider_force_reconnect_count"] = int(
+                                P610_LOCAL_AUDIO_STATE.get("provider_force_reconnect_count") or 0
+                            ) + 1
+                            P610_LOCAL_AUDIO_STATE["last_initial_provider_retry_at"] = time.time()
+                            P610_LOCAL_AUDIO_STATE["last_provider_force_reconnect_at"] = time.time()
+                            if not p610_wake_gate.active:
+                                P610_LOCAL_AUDIO_STATE["standby_state"] = "reconnecting"
+                            logger.warning(
+                                "P610 Gemini initial standby is still not ready after {:.1f}s; "
+                                "retrying provider connection (attempt {})",
+                                initial_elapsed,
+                                initial_retry_attempt,
+                            )
+                            retry_succeeded = False
+                            try:
+                                await llm._reconnect()
+                                retry_deadline = time.monotonic() + 6.0
+                                while (
+                                    P610_LOCAL_AUDIO_STATE.get("running") is True
+                                    and P610_LOCAL_AUDIO_STATE.get("started_at") == session_started_at
+                                    and time.monotonic() < retry_deadline
+                                ):
+                                    if p610_wake_gate.provider_ready():
+                                        retry_succeeded = True
+                                        break
+                                    await asyncio.sleep(0.05)
+
+                                retry_elapsed = time.monotonic() - retry_started
+                                P610_LOCAL_AUDIO_STATE["last_provider_reconnect_duration_ms"] = round(
+                                    retry_elapsed * 1000, 1
+                                )
+                                if retry_succeeded:
+                                    seen_ready = True
+                                    ready_since = time.monotonic()
+                                    not_ready_since = None
+                                    warned_stuck = False
+                                    P610_LOCAL_AUDIO_STATE["provider_healthy"] = True
+                                    P610_LOCAL_AUDIO_STATE["provider_input_ready"] = True
+                                    P610_LOCAL_AUDIO_STATE["last_provider_recovery_at"] = time.time()
+                                    P610_LOCAL_AUDIO_STATE["last_provider_error"] = ""
+                                    P610_LOCAL_AUDIO_STATE["last_provider_error_at"] = None
+                                    P610_LOCAL_AUDIO_STATE["next_initial_provider_retry_at"] = None
+                                    if not p610_wake_gate.active:
+                                        P610_LOCAL_AUDIO_STATE["standby_state"] = "ready"
+                                    logger.info(
+                                        "P610 periodic initial Gemini retry recovered standby in {:.2f}s",
+                                        retry_elapsed,
+                                    )
+                                    continue
+
+                                P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                                P610_LOCAL_AUDIO_STATE["provider_input_ready"] = False
+                                P610_LOCAL_AUDIO_STATE["last_provider_error"] = (
+                                    "Gemini initial standby still not ready after periodic reconnect "
+                                    f"attempt {initial_retry_attempt}"
+                                )
+                                P610_LOCAL_AUDIO_STATE["last_provider_error_at"] = time.time()
+                            except Exception as err:
+                                P610_LOCAL_AUDIO_STATE["provider_healthy"] = False
+                                P610_LOCAL_AUDIO_STATE["provider_input_ready"] = False
+                                P610_LOCAL_AUDIO_STATE["last_provider_error"] = (
+                                    f"periodic initial Gemini reconnect failed: {err}"[:1000]
+                                )
+                                P610_LOCAL_AUDIO_STATE["last_provider_error_at"] = time.time()
+                                logger.exception(
+                                    "P610 periodic initial Gemini retry attempt {} failed",
+                                    initial_retry_attempt,
+                                )
+                            finally:
+                                P610_LOCAL_AUDIO_STATE["initial_provider_retry_in_progress"] = False
+                                P610_LOCAL_AUDIO_STATE["provider_recovery_in_progress"] = False
+
+                            retry_delay_seconds = min(
+                                300.0,
+                                60.0 * (2 ** max(0, initial_retry_attempt - 1)),
+                            )
+                            next_initial_retry_at = time.monotonic() + retry_delay_seconds
+                            P610_LOCAL_AUDIO_STATE[
+                                "last_initial_provider_retry_delay_seconds"
+                            ] = retry_delay_seconds
+                            P610_LOCAL_AUDIO_STATE[
+                                "next_initial_provider_retry_at"
+                            ] = time.time() + retry_delay_seconds
+                            if not p610_wake_gate.active:
+                                P610_LOCAL_AUDIO_STATE["standby_state"] = "degraded"
+                            logger.warning(
+                                "P610 initial Gemini retry did not recover standby; next retry in {:.0f}s",
+                                retry_delay_seconds,
+                            )
+                            await asyncio.sleep(0.10)
+                            continue
                     elif seen_ready:
                         if not_ready_since is None:
                             not_ready_since = time.monotonic()
@@ -6789,6 +7260,14 @@ async def run_bot(
         )
         context = LLMContext(context_messages, active_tools_schema) if active_tools_schema else LLMContext(context_messages)
         context_for_memory = context
+        if bridge:
+            bridge.set_tool_guard(
+                VoiceControlGuard(
+                    lambda: _latest_context_user_text(context),
+                    source="p610-composed" if p610_wake_gate else "browser-composed",
+                    settle_seconds=0.30,
+                )
+            )
         vad_step = _enabled_step(flow, "vad")
         vad_processor = VADProcessor(vad_analyzer=_composed_vad_analyzer(flow)) if vad_step else None
         if vad_step:
@@ -6836,7 +7315,11 @@ async def run_bot(
         if audio_debug:
             processors.append(audio_debug.output_recorder)
         if p610_wake_gate:
-            processors.append(P610WakeOutputGateProcessor(p610_wake_gate, audio_debug))
+            processors.append(P610WakeOutputGateProcessor(
+                p610_wake_gate,
+                audio_debug,
+                bridge.mutating_tool_pending if bridge else None,
+            ))
         processors.extend([transport.output(), context_aggregator.assistant()])
 
         pipeline = Pipeline(processors)

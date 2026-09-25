@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 import uuid
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,7 @@ from pipecat.services.llm_service import LLMService
 from pipecat.services.mcp_service import MCPClient
 
 from app.conversation_log import CONVERSATION_LOGS
+from app.control_guard import _is_mutating_tool
 
 
 class MCPAuthenticationError(RuntimeError):
@@ -199,6 +201,20 @@ def _schema_type(value: Any) -> tuple[str, bool]:
     return "", False
 
 
+def _is_null_only_schema(schema: Any) -> bool:
+    """Return whether a schema branch represents only JSON null."""
+
+    if not isinstance(schema, dict):
+        return False
+    schema_type, _ = _schema_type(schema.get("type"))
+    if schema_type == "null":
+        return True
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list) and enum_values and all(value is None for value in enum_values):
+        return True
+    return "const" in schema and schema.get("const") is None
+
+
 def _sanitize_llm_schema(schema: Any) -> dict[str, Any]:
     """Return a Gemini/Pipecat-compatible subset of JSON Schema."""
 
@@ -224,14 +240,14 @@ def _sanitize_llm_schema(schema: Any) -> dict[str, Any]:
         clean_enum = [
             value
             for value in enum_values
-            if isinstance(value, str | int | float | bool) or value is None
+            if isinstance(value, str | int | float | bool)
         ]
         if clean_enum:
             sanitized["enum"] = clean_enum
 
     if "const" in schema and "enum" not in sanitized:
         const = schema.get("const")
-        if isinstance(const, str | int | float | bool) or const is None:
+        if isinstance(const, str | int | float | bool):
             sanitized["enum"] = [const]
 
     properties = schema.get("properties")
@@ -263,6 +279,9 @@ def _sanitize_llm_schema(schema: Any) -> dict[str, Any]:
     if isinstance(any_of_items, list):
         clean_any_of: list[dict[str, Any]] = []
         for item in any_of_items:
+            if _is_null_only_schema(item):
+                nullable = True
+                continue
             item_type, item_nullable = _schema_type(item.get("type") if isinstance(item, dict) else None)
             nullable = nullable or item_nullable or item_type == "null"
             if item_type == "null":
@@ -608,6 +627,30 @@ class CombinedMCPBridge:
         self.bridges: list[tuple[dict[str, Any], HomeAssistantMCPBridge]] = []
         self._tool_routes: dict[str, tuple[HomeAssistantMCPBridge, str]] = {}
         self._tools_schema: ToolsSchema | None = None
+        self._tool_guard: Callable[[str, dict[str, Any]], Awaitable[str | None]] | None = None
+        self._control_result_callback: Callable[[str, dict[str, Any], str], Any] | None = None
+        self._mutating_calls_in_flight = 0
+
+    def set_tool_guard(
+        self,
+        guard: Callable[[str, dict[str, Any]], Awaitable[str | None]] | None,
+    ) -> None:
+        """Install a per-session safety guard before any routed MCP side effect."""
+
+        self._tool_guard = guard
+
+    def mutating_tool_pending(self) -> bool:
+        """Whether a guarded Home Assistant side effect is awaiting a real result."""
+
+        return self._mutating_calls_in_flight > 0
+
+    def set_control_result_callback(
+        self,
+        callback: Callable[[str, dict[str, Any], str], Any] | None,
+    ) -> None:
+        """Install optional local feedback callback for successful control tools."""
+
+        self._control_result_callback = callback
 
     async def __aenter__(self) -> "CombinedMCPBridge":
         await self.start()
@@ -731,8 +774,78 @@ class CombinedMCPBridge:
         route = self._tool_routes.get(name)
         if not route:
             raise RuntimeError(f"Unknown MCP tool: {name}")
-        bridge, original_name = route
-        return await bridge.call_tool(original_name, arguments)
+        mutating = _is_mutating_tool(name)
+        if mutating:
+            self._mutating_calls_in_flight += 1
+        try:
+            if self._tool_guard is not None:
+                reason = await self._tool_guard(name, dict(arguments or {}))
+                if reason:
+                    logger.warning(
+                        "Voice control guard blocked tool={} reason={}",
+                        name,
+                        reason,
+                    )
+                    superseded = "pending control superseded" in reason
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": (
+                                "voice_control_guard_superseded"
+                                if superseded
+                                else "voice_control_guard_blocked"
+                            ),
+                            "reason": reason,
+                            "retry": (
+                                "Do not tell the user the action failed. Re-read the complete latest user turn and issue exactly one corrected control tool now."
+                                if superseded
+                                else "Use only the explicit action, timing, target, and room from the complete current user turn."
+                            ),
+                            "report_failure": not superseded,
+                        },
+                        ensure_ascii=False,
+                    )
+            bridge, original_name = route
+            result = await bridge.call_tool(original_name, arguments)
+
+            success = True
+            parsed_result: Any = None
+            try:
+                parsed_result = json.loads(result)
+                if isinstance(parsed_result, dict) and parsed_result.get("success") is False:
+                    success = False
+            except Exception:
+                lowered = str(result).casefold()
+                if "error calling tool" in lowered or '"success": false' in lowered:
+                    success = False
+
+            short_name = str(name or "").rsplit("__", 1)[-1]
+            if success and self._control_result_callback is not None and short_name in {
+                "HassTurnOn",
+                "HassTurnOff",
+            }:
+                callback_result = self._control_result_callback(name, dict(arguments or {}), result)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+
+                # The physical P610 has already emitted a deterministic success
+                # tone. Tell Gemini not to add a redundant spoken "включила /
+                # выключила / готово" acknowledgement for this simple control.
+                feedback = (
+                    "Local device-control confirmation tone already played after the real "
+                    "Home Assistant success result. Do not verbally acknowledge this on/off "
+                    "action; remain silent unless the user asked an additional question."
+                )
+                if isinstance(parsed_result, dict):
+                    parsed_result["local_feedback"] = feedback
+                    result = json.dumps(parsed_result, ensure_ascii=False)
+                else:
+                    result = str(result) + "\\n" + feedback
+
+            return result
+        finally:
+            if mutating:
+                self._mutating_calls_in_flight = max(0, self._mutating_calls_in_flight - 1)
 
 
 async def check_mcp(

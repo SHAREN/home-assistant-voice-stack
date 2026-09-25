@@ -8,6 +8,7 @@ RUN apt-get update     && apt-get install --yes --no-install-recommends build-es
 COPY app/main.py /app/main.py
 COPY app/audio_debug.py /app/audio_debug.py
 COPY app/mcp_bridge.py /app/mcp_bridge.py
+COPY app/control_guard.py /app/control_guard.py
 COPY app/session_memory.py /app/session_memory.py
 COPY app/conversation_log.py /app/conversation_log.py
 COPY app/ui/index.html /app/ui/index.html
@@ -16,10 +17,11 @@ COPY sounds/ /app/sounds/
 COPY root/run.sh /run.sh
 COPY root/patch_webrtc_ice.py /patch_webrtc_ice.py
 COPY root/patch_gemini_idle_reconnect.py /patch_gemini_idle_reconnect.py
-RUN python3 /patch_webrtc_ice.py && python3 /patch_gemini_idle_reconnect.py && rm -f /patch_webrtc_ice.py /patch_gemini_idle_reconnect.py && chmod a+x /run.sh
+COPY root/patch_gemini_goaway.py /patch_gemini_goaway.py
+RUN python3 /patch_webrtc_ice.py && python3 /patch_gemini_idle_reconnect.py && python3 /patch_gemini_goaway.py && rm -f /patch_webrtc_ice.py /patch_gemini_idle_reconnect.py /patch_gemini_goaway.py && chmod a+x /run.sh
 
 LABEL \
-    io.hass.version="0.1.75-proxy27" \
+    io.hass.version="0.1.75-proxy39" \
     io.hass.type="app" \
     org.opencontainers.image.title="Pipecat Assist Proxy" \
     org.opencontainers.image.source="https://github.com/kyvaith/pipecat-homeassistant"

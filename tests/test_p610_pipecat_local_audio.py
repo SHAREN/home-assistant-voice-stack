@@ -5,6 +5,7 @@ MAIN = (ROOT / "addons/pipecat_assist_proxy/app/main.py").read_text(encoding="ut
 CONFIG = (ROOT / "addons/pipecat_assist_proxy/config.yaml").read_text(encoding="utf-8")
 DOCKERFILE = (ROOT / "addons/pipecat_assist_proxy/Dockerfile").read_text(encoding="utf-8")
 RUN_SH = (ROOT / "addons/pipecat_assist_proxy/root/run.sh").read_text(encoding="utf-8")
+MCP_BRIDGE = (ROOT / "addons/pipecat_assist_proxy/app/mcp_bridge.py").read_text(encoding="utf-8")
 
 
 def test_addon_exposes_host_audio_and_keeps_p610_opt_in():
@@ -111,10 +112,12 @@ def test_proxy20_does_not_retry_short_non_russian_garbage_on_p610():
     assert 'not re.search(r"[А-Яа-яЁё]", user_text)' in MAIN
 
 
-def test_proxy23_keeps_short_command_window_open_before_wake_cue():
+def test_proxy39_plays_wake_cue_immediately_while_buffering_mic_audio():
     assert 'P610_CUE_DECISION_SECONDS", 0.90' in MAIN
-    assert "await asyncio.sleep(self._gate.cue_decision_seconds)" in MAIN
-    assert "wake_cue_skipped_for_continuation" in MAIN
+    assert 'name="p610-wake-cue-immediate"' in MAIN
+    assert "self._gate.cue_playing = True" in MAIN
+    assert "self._gate.buffer_activation_frame(frame)" in MAIN
+    assert "defer transmission until the" in MAIN
 
 
 def test_proxy23_uses_faster_p610_only_gemini_end_of_speech():
@@ -185,3 +188,34 @@ def test_proxy28_active_idle_timeout_starts_on_wake_and_respects_busy_work():
     assert 'provider_recovery_in_progress' in MAIN
     assert '_context_has_pending_tool' in MAIN
     assert 'p610_active_idle_timeout_seconds: 30' in CONFIG
+
+
+def test_proxy29_session_end_sound_cannot_retrigger_wake_word():
+    assert 'P610_END_CUE_WAKE_GUARD_SECONDS' in MAIN
+    assert 'end_cue_playing' in MAIN
+    assert 'wake_guard_until_monotonic' in MAIN
+    assert 'begin_end_cue_guard' in MAIN
+    assert 'reset_after_end_cue' in MAIN
+    assert 'self._gate.begin_end_cue_guard()' in MAIN
+    assert 'self._gate.reset_after_end_cue()' in MAIN
+    assert 'p610_end_cue_wake_guard_seconds: 1.0' in CONFIG
+    assert 'P610_END_CUE_WAKE_GUARD_SECONDS' in RUN_SH
+
+def test_proxy32_retries_initial_gemini_standby_with_backoff():
+    assert 'initial_provider_retry_count' in MAIN
+    assert 'initial_provider_retry_in_progress' in MAIN
+    assert 'next_initial_retry_at = initial_not_ready_since + 25.0' in MAIN
+    assert 'P610 Gemini initial standby is still not ready' in MAIN
+    assert 'P610 periodic initial Gemini retry recovered standby' in MAIN
+    assert '60.0 * (2 ** max(0, initial_retry_attempt - 1))' in MAIN
+    assert '300.0' in MAIN
+    assert 'next_initial_provider_retry_at' in MAIN
+
+
+def test_proxy39_sanitizes_null_only_mcp_schema_branches_for_gemini():
+    assert "def _is_null_only_schema" in MCP_BRIDGE
+    assert "all(value is None for value in enum_values)" in MCP_BRIDGE
+    assert "if _is_null_only_schema(item):" in MCP_BRIDGE
+    assert "value is None" not in MCP_BRIDGE.split("clean_enum =", 1)[1].split("if clean_enum:", 1)[0]
+    assert "const is None" not in MCP_BRIDGE
+    assert "_sanitize_tools_schema" in MCP_BRIDGE
